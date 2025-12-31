@@ -84,6 +84,11 @@ impl ModSecEngine {
         let modsec = ModSecurity::default();
         let mut rules = Rules::new();
 
+        // Enable the rule engine (required for blocking to work)
+        rules
+            .add_plain("SecRuleEngine On")
+            .map_err(|e| anyhow::anyhow!("Failed to enable SecRuleEngine: {}", e))?;
+
         // Load rules from configured paths
         let mut loaded_count = 0;
         for path_pattern in &config.rules_paths {
@@ -169,7 +174,7 @@ impl ModSecAgent {
         method: &str,
         uri: &str,
         headers: &HashMap<String, Vec<String>>,
-        _body: Option<&[u8]>,
+        body: Option<&[u8]>,
         _client_ip: &str,
     ) -> Result<Option<(u16, String)>> {
         let engine = self.engine.read().await;
@@ -194,20 +199,43 @@ impl ModSecAgent {
             }
         }
 
-        // Process request headers
+        // Process request headers (phase 1)
         tx.process_request_headers()
             .map_err(|e| anyhow::anyhow!("process_request_headers failed: {}", e))?;
 
-        // Check for intervention
+        // Check for intervention after headers
         if let Some(intervention) = tx.intervention() {
             let status = intervention.status() as u16;
             if status != 0 && status != 200 {
                 debug!(
                     correlation_id = correlation_id,
                     status = status,
-                    "ModSecurity intervention"
+                    "ModSecurity intervention (headers)"
                 );
                 return Ok(Some((status, "Blocked by ModSecurity".to_string())));
+            }
+        }
+
+        // Process body if provided (phase 2)
+        if let Some(body_data) = body {
+            if !body_data.is_empty() {
+                tx.append_request_body(body_data)
+                    .map_err(|e| anyhow::anyhow!("append_request_body failed: {}", e))?;
+                tx.process_request_body()
+                    .map_err(|e| anyhow::anyhow!("process_request_body failed: {}", e))?;
+
+                // Check for intervention after body
+                if let Some(intervention) = tx.intervention() {
+                    let status = intervention.status() as u16;
+                    if status != 0 && status != 200 {
+                        debug!(
+                            correlation_id = correlation_id,
+                            status = status,
+                            "ModSecurity intervention (body)"
+                        );
+                        return Ok(Some((status, "Blocked by ModSecurity".to_string())));
+                    }
+                }
             }
         }
 
@@ -230,28 +258,8 @@ impl AgentHandler for ModSecAgent {
             }
         }
 
-        // If body inspection is enabled, we need to wait for the body
-        // Store the request info for later
-        {
-            let engine = self.engine.read().await;
-            if engine.config.body_inspection_enabled {
-                let mut pending = self.pending_requests.write().await;
-                pending.insert(
-                    correlation_id.clone(),
-                    PendingTransaction {
-                        body: BodyAccumulator::default(),
-                        method: event.method.clone(),
-                        uri: event.uri.clone(),
-                        headers: event.headers.clone(),
-                        client_ip: event.metadata.client_ip.clone(),
-                    },
-                );
-                // We'll process when we get the body or if there's no body
-                return AgentResponse::default_allow();
-            }
-        }
-
-        // No body inspection - process immediately
+        // Always process headers immediately (ModSecurity phase 1)
+        // This detects attacks in URI, query string, and headers
         match self
             .process_request(
                 correlation_id,
@@ -302,7 +310,24 @@ impl AgentHandler for ModSecAgent {
                         })
                 }
             }
-            Ok(None) => AgentResponse::default_allow(),
+            Ok(None) => {
+                // Headers passed - if body inspection enabled, store for body processing
+                let engine = self.engine.read().await;
+                if engine.config.body_inspection_enabled {
+                    let mut pending = self.pending_requests.write().await;
+                    pending.insert(
+                        correlation_id.clone(),
+                        PendingTransaction {
+                            body: BodyAccumulator::default(),
+                            method: event.method.clone(),
+                            uri: event.uri.clone(),
+                            headers: event.headers.clone(),
+                            client_ip: event.metadata.client_ip.clone(),
+                        },
+                    );
+                }
+                AgentResponse::default_allow()
+            }
             Err(e) => {
                 warn!(error = %e, "ModSecurity processing error");
                 AgentResponse::default_allow()
@@ -457,5 +482,74 @@ mod tests {
         assert!(config.body_inspection_enabled);
         assert!(!config.response_inspection_enabled);
         assert_eq!(config.max_body_size, 1048576);
+    }
+
+    #[test]
+    fn test_modsec_engine_direct() {
+        // Test ModSecurity engine directly without the agent wrapper
+        let modsec = ModSecurity::default();
+        let mut rules = Rules::new();
+
+        // Enable the rule engine and add a simple test rule
+        rules
+            .add_plain("SecRuleEngine On")
+            .expect("Failed to enable engine");
+        let rule = r#"SecRule QUERY_STRING "@contains attack" "id:1,phase:1,deny,status:403""#;
+        rules.add_plain(rule).expect("Failed to add rule");
+
+        // Create transaction
+        let mut tx = modsec
+            .transaction_builder()
+            .with_rules(&rules)
+            .build()
+            .expect("Failed to create transaction");
+
+        // Process a malicious request
+        tx.process_uri("/test?q=attack", "GET", "1.1")
+            .expect("process_uri failed");
+        tx.process_request_headers()
+            .expect("process_request_headers failed");
+
+        // Check intervention
+        let intervention = tx.intervention();
+        println!("Intervention: {:?}", intervention.is_some());
+        if let Some(i) = &intervention {
+            println!("Status: {}", i.status());
+        }
+
+        assert!(
+            intervention.is_some(),
+            "Expected intervention for attack in query string"
+        );
+    }
+
+    #[test]
+    fn test_modsec_engine_clean_request() {
+        let modsec = ModSecurity::default();
+        let mut rules = Rules::new();
+
+        rules
+            .add_plain("SecRuleEngine On")
+            .expect("Failed to enable engine");
+        let rule = r#"SecRule QUERY_STRING "@contains attack" "id:1,phase:1,deny,status:403""#;
+        rules.add_plain(rule).expect("Failed to add rule");
+
+        let mut tx = modsec
+            .transaction_builder()
+            .with_rules(&rules)
+            .build()
+            .expect("Failed to create transaction");
+
+        // Process a clean request
+        tx.process_uri("/test?q=hello", "GET", "1.1")
+            .expect("process_uri failed");
+        tx.process_request_headers()
+            .expect("process_request_headers failed");
+
+        let intervention = tx.intervention();
+        assert!(
+            intervention.is_none() || intervention.as_ref().map(|i| i.status()) == Some(200),
+            "Clean request should not trigger intervention"
+        );
     }
 }
