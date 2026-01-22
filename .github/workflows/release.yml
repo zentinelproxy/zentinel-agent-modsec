@@ -67,23 +67,22 @@ jobs:
             libmodsecurity-dev \
             libmodsecurity3 \
             pkg-config
-          # Check if pkg-config file exists
-          if ! pkg-config --exists modsecurity 2>/dev/null; then
-            echo "modsecurity.pc not found, creating manually..."
-            sudo mkdir -p /usr/lib/pkgconfig
-            echo 'prefix=/usr' | sudo tee /usr/lib/pkgconfig/modsecurity.pc
-            echo 'exec_prefix=${prefix}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo 'libdir=${exec_prefix}/lib/x86_64-linux-gnu' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo 'includedir=${prefix}/include' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo '' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo 'Name: modsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo 'Description: ModSecurity library' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo 'Version: 3.0.13' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo 'Libs: -L${libdir} -lmodsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-            echo 'Cflags: -I${includedir}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          fi
+          # Create pkg-config file
+          sudo mkdir -p /usr/lib/pkgconfig
+          echo 'prefix=/usr' | sudo tee /usr/lib/pkgconfig/modsecurity.pc
+          echo 'exec_prefix=${prefix}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo 'libdir=${exec_prefix}/lib/x86_64-linux-gnu' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo 'includedir=${prefix}/include' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo '' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo 'Name: modsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo 'Description: ModSecurity library' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo 'Version: 3.0.13' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo 'Libs: -L${libdir} -lmodsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          echo 'Cflags: -I${includedir}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+          # Set PKG_CONFIG_PATH for subsequent steps
+          echo "PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
           # Verify
-          pkg-config --cflags --libs modsecurity || echo "Warning: pkg-config still fails"
+          PKG_CONFIG_PATH=/usr/lib/pkgconfig pkg-config --cflags --libs modsecurity
 
       - name: Install libmodsecurity (macOS)
         if: runner.os == 'macOS'
