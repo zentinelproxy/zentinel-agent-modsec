@@ -70,25 +70,17 @@ jobs:
           # Check if pkg-config file exists
           if ! pkg-config --exists modsecurity 2>/dev/null; then
             echo "modsecurity.pc not found, creating manually..."
-            # Find the library
-            MODSEC_LIB=$(find /usr -name "libmodsecurity.so*" 2>/dev/null | head -1)
-            MODSEC_INC="/usr/include"
-            if [ -n "$MODSEC_LIB" ]; then
-              MODSEC_LIBDIR=$(dirname "$MODSEC_LIB")
-              sudo mkdir -p /usr/lib/pkgconfig
-              cat << 'PKGEOF' | sudo tee /usr/lib/pkgconfig/modsecurity.pc
-prefix=/usr
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib/x86_64-linux-gnu
-includedir=${prefix}/include
-
-Name: modsecurity
-Description: ModSecurity library
-Version: 3.0.13
-Libs: -L${libdir} -lmodsecurity
-Cflags: -I${includedir}
-PKGEOF
-            fi
+            sudo mkdir -p /usr/lib/pkgconfig
+            echo 'prefix=/usr' | sudo tee /usr/lib/pkgconfig/modsecurity.pc
+            echo 'exec_prefix=${prefix}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo 'libdir=${exec_prefix}/lib/x86_64-linux-gnu' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo 'includedir=${prefix}/include' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo '' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo 'Name: modsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo 'Description: ModSecurity library' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo 'Version: 3.0.13' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo 'Libs: -L${libdir} -lmodsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            echo 'Cflags: -I${includedir}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
           fi
           # Verify
           pkg-config --cflags --libs modsecurity || echo "Warning: pkg-config still fails"
