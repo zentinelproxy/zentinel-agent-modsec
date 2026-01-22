@@ -62,27 +62,27 @@ jobs:
       - name: Install libmodsecurity (Linux)
         if: runner.os == 'Linux'
         run: |
-          # Install build dependencies for modsecurity
+          # Install build dependencies for modsecurity from source
           sudo apt-get install -y \
-            libmodsecurity-dev \
-            libmodsecurity3 \
-            pkg-config
-          # Create pkg-config file
-          sudo mkdir -p /usr/lib/pkgconfig
-          echo 'prefix=/usr' | sudo tee /usr/lib/pkgconfig/modsecurity.pc
-          echo 'exec_prefix=${prefix}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo 'libdir=${exec_prefix}/lib/x86_64-linux-gnu' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo 'includedir=${prefix}/include' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo '' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo 'Name: modsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo 'Description: ModSecurity library' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo 'Version: 3.0.13' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo 'Libs: -L${libdir} -lmodsecurity' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
-          echo 'Cflags: -I${includedir}' | sudo tee -a /usr/lib/pkgconfig/modsecurity.pc
+            g++ apt-utils autoconf automake build-essential git libcurl4-openssl-dev \
+            libgeoip-dev liblmdb-dev libpcre2-dev libtool libxml2-dev libyajl-dev \
+            pkg-config zlib1g-dev
+          # Build ModSecurity v3 from source
+          cd /tmp
+          git clone --depth 1 --branch v3.0.13 https://github.com/owasp-modsecurity/ModSecurity.git
+          cd ModSecurity
+          git submodule init
+          git submodule update
+          ./build.sh
+          ./configure --prefix=/usr/local
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
           # Set PKG_CONFIG_PATH for subsequent steps
-          echo "PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/local/lib" >> $GITHUB_ENV
           # Verify
-          PKG_CONFIG_PATH=/usr/lib/pkgconfig pkg-config --cflags --libs modsecurity
+          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --cflags --libs modsecurity
 
       - name: Install libmodsecurity (macOS)
         if: runner.os == 'macOS'
