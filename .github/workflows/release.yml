@@ -27,10 +27,6 @@ jobs:
             os: ubuntu-latest
             artifact: linux-x86_64
           # NOTE: aarch64-linux cross-compilation disabled - requires libmodsecurity cross-compile
-          # - target: aarch64-unknown-linux-gnu
-          #   os: ubuntu-latest
-          #   artifact: linux-aarch64
-          #   cross: true
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: darwin-aarch64
@@ -65,7 +61,36 @@ jobs:
       - name: Install libmodsecurity (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get install -y libmodsecurity-dev libmodsecurity3
+          # Install build dependencies for modsecurity
+          sudo apt-get install -y \
+            libmodsecurity-dev \
+            libmodsecurity3 \
+            pkg-config
+          # Check if pkg-config file exists
+          if ! pkg-config --exists modsecurity 2>/dev/null; then
+            echo "modsecurity.pc not found, creating manually..."
+            # Find the library
+            MODSEC_LIB=$(find /usr -name "libmodsecurity.so*" 2>/dev/null | head -1)
+            MODSEC_INC="/usr/include"
+            if [ -n "$MODSEC_LIB" ]; then
+              MODSEC_LIBDIR=$(dirname "$MODSEC_LIB")
+              sudo mkdir -p /usr/lib/pkgconfig
+              cat << 'PKGEOF' | sudo tee /usr/lib/pkgconfig/modsecurity.pc
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib/x86_64-linux-gnu
+includedir=${prefix}/include
+
+Name: modsecurity
+Description: ModSecurity library
+Version: 3.0.13
+Libs: -L${libdir} -lmodsecurity
+Cflags: -I${includedir}
+PKGEOF
+            fi
+          fi
+          # Verify
+          pkg-config --cflags --libs modsecurity || echo "Warning: pkg-config still fails"
 
       - name: Install libmodsecurity (macOS)
         if: runner.os == 'macOS'
