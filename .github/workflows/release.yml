@@ -65,7 +65,7 @@ jobs:
           # Install build dependencies for modsecurity from source
           sudo apt-get install -y \
             g++ apt-utils autoconf automake build-essential git libcurl4-openssl-dev \
-            libgeoip-dev liblmdb-dev libpcre2-dev libtool libxml2-dev libyajl-dev \
+            libgeoip-dev liblmdb-dev libpcre3-dev libpcre2-dev libtool libxml2-dev libyajl-dev \
             pkg-config zlib1g-dev
           # Build ModSecurity v3 from source
           cd /tmp
