@@ -1,13 +1,13 @@
-//! Sentinel ModSecurity Agent Library
+//! Zentinel ModSecurity Agent Library
 //!
-//! A Web Application Firewall agent for Sentinel proxy that uses libmodsecurity
+//! A Web Application Firewall agent for Zentinel proxy that uses libmodsecurity
 //! for full OWASP Core Rule Set (CRS) support.
 //!
 //! # Example
 //!
 //! ```ignore
-//! use sentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-//! use sentinel_agent_protocol::AgentServer;
+//! use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
+//! use zentinel_agent_protocol::AgentServer;
 //!
 //! let config = ModSecConfig {
 //!     rules_paths: vec!["/etc/modsecurity/crs/rules/*.conf".to_string()],
@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use sentinel_agent_protocol::{
+use zentinel_agent_protocol::{
     AgentHandler, AgentResponse, AuditMetadata, ConfigureEvent, HeaderOp, RequestBodyChunkEvent,
     RequestHeadersEvent, ResponseBodyChunkEvent, ResponseHeadersEvent, EventType,
     v2::{
@@ -317,7 +317,7 @@ impl ModSecAgent {
 impl AgentHandlerV2 for ModSecAgent {
     fn capabilities(&self) -> AgentCapabilities {
         AgentCapabilities::new(
-            "sentinel-modsec-agent",
+            "zentinel-modsec-agent",
             "ModSecurity WAF Agent",
             env!("CARGO_PKG_VERSION"),
         )
@@ -371,12 +371,12 @@ impl AgentHandlerV2 for ModSecAgent {
 
     fn health_status(&self) -> HealthStatus {
         // Return healthy status with agent ID
-        HealthStatus::healthy("sentinel-modsec-agent")
+        HealthStatus::healthy("zentinel-modsec-agent")
     }
 
     fn metrics_report(&self) -> Option<MetricsReport> {
         // Basic metrics report - can be extended to include more detailed metrics
-        Some(MetricsReport::new("sentinel-modsec-agent", 10_000))
+        Some(MetricsReport::new("zentinel-modsec-agent", 10_000))
     }
 
     async fn on_shutdown(&self, reason: ShutdownReason, grace_period_ms: u64) {

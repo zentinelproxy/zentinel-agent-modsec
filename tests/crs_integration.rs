@@ -4,8 +4,8 @@
 //! The CRS must be present in testdata/crs/ for these tests to run.
 
 use base64::Engine;
-use sentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-use sentinel_agent_protocol::{
+use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
+use zentinel_agent_protocol::{
     AgentClient, AgentServer, Decision, EventType, RequestBodyChunkEvent, RequestHeadersEvent,
     RequestMetadata,
 };
@@ -775,7 +775,7 @@ async fn test_crs_detect_only_mode() {
     );
 
     let has_detection = response.request_headers.iter().any(|h| match h {
-        sentinel_agent_protocol::HeaderOp::Set { name, .. } => name == "X-WAF-Detected",
+        zentinel_agent_protocol::HeaderOp::Set { name, .. } => name == "X-WAF-Detected",
         _ => false,
     });
     assert!(has_detection, "Should have X-WAF-Detected header");

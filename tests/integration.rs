@@ -1,4 +1,4 @@
-//! Integration tests for the ModSecurity WAF agent using the sentinel-agent-protocol.
+//! Integration tests for the ModSecurity WAF agent using the zentinel-agent-protocol.
 //!
 //! These tests spin up an actual AgentServer and connect via AgentClient
 //! to verify the full protocol flow.
@@ -7,8 +7,8 @@
 //! you would typically use the full OWASP CRS ruleset.
 
 use base64::Engine;
-use sentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-use sentinel_agent_protocol::{
+use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
+use zentinel_agent_protocol::{
     AgentClient, AgentServer, Decision, EventType, RequestBodyChunkEvent, RequestHeadersEvent,
     RequestMetadata, ResponseBodyChunkEvent,
 };
@@ -198,7 +198,7 @@ async fn test_sqli_in_query_string_blocked() {
 
     // Check for WAF headers
     let has_waf_blocked = response.response_headers.iter().any(|h| match h {
-        sentinel_agent_protocol::HeaderOp::Set { name, value } => {
+        zentinel_agent_protocol::HeaderOp::Set { name, value } => {
             name == "X-WAF-Blocked" && value == "true"
         }
         _ => false,
@@ -252,7 +252,7 @@ async fn test_sqli_detect_only_mode() {
     assert!(is_allow(&response.decision), "Expected Allow decision");
 
     let has_waf_detected = response.request_headers.iter().any(|h| match h {
-        sentinel_agent_protocol::HeaderOp::Set { name, .. } => name == "X-WAF-Detected",
+        zentinel_agent_protocol::HeaderOp::Set { name, .. } => name == "X-WAF-Detected",
         _ => false,
     });
     assert!(has_waf_detected, "Expected X-WAF-Detected header");

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.4
 
-# Sentinel ModSecurity Agent Container Image
+# Zentinel ModSecurity Agent Container Image
 #
 # Targets:
 #   - prebuilt: For CI with pre-built binaries
@@ -10,16 +10,16 @@
 ################################################################################
 FROM gcr.io/distroless/cc-debian12:nonroot AS prebuilt
 
-COPY sentinel-modsec-agent /sentinel-modsec-agent
+COPY zentinel-modsec-agent /zentinel-modsec-agent
 
-LABEL org.opencontainers.image.title="Sentinel ModSecurity Agent" \
-      org.opencontainers.image.description="Sentinel ModSecurity Agent for Sentinel reverse proxy" \
+LABEL org.opencontainers.image.title="Zentinel ModSecurity Agent" \
+      org.opencontainers.image.description="Zentinel ModSecurity Agent for Zentinel reverse proxy" \
       org.opencontainers.image.vendor="Raskell" \
-      org.opencontainers.image.source="https://github.com/raskell-io/sentinel-agent-modsec"
+      org.opencontainers.image.source="https://github.com/zentinelproxy/zentinel-agent-modsec"
 
-ENV RUST_LOG=info,sentinel_modsec_agent=debug \
-    SOCKET_PATH=/var/run/sentinel/modsec.sock
+ENV RUST_LOG=info,zentinel_modsec_agent=debug \
+    SOCKET_PATH=/var/run/zentinel/modsec.sock
 
 USER nonroot:nonroot
 
-ENTRYPOINT ["/sentinel-modsec-agent"]
+ENTRYPOINT ["/zentinel-modsec-agent"]

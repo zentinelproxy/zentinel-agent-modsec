@@ -1,8 +1,8 @@
-# sentinel-agent-modsec
+# zentinel-agent-modsec
 
-ModSecurity WAF agent for [Sentinel](https://github.com/raskell-io/sentinel) reverse proxy. Provides full OWASP Core Rule Set (CRS) support via libmodsecurity.
+ModSecurity WAF agent for [Zentinel](https://github.com/zentinelproxy/zentinel) reverse proxy. Provides full OWASP Core Rule Set (CRS) support via libmodsecurity.
 
-> **Note:** This agent uses libmodsecurity bindings and requires the library to be installed on your system. For a lightweight, zero-dependency alternative with basic detection rules, see [sentinel-agent-waf](https://github.com/raskell-io/sentinel-agent-waf).
+> **Note:** This agent uses libmodsecurity bindings and requires the library to be installed on your system. For a lightweight, zero-dependency alternative with basic detection rules, see [zentinel-agent-waf](https://github.com/zentinelproxy/zentinel-agent-waf).
 
 ## Features
 
@@ -44,14 +44,14 @@ make && make install
 ### From crates.io
 
 ```bash
-cargo install sentinel-agent-modsec
+cargo install zentinel-agent-modsec
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/raskell-io/sentinel-agent-modsec
-cd sentinel-agent-modsec
+git clone https://github.com/zentinelproxy/zentinel-agent-modsec
+cd zentinel-agent-modsec
 cargo build --release
 ```
 
@@ -144,8 +144,8 @@ After setup, your directory should look like:
 
 **Basic usage with full CRS:**
 ```bash
-sentinel-modsec-agent \
-  --socket /var/run/sentinel/modsec.sock \
+zentinel-modsec-agent \
+  --socket /var/run/zentinel/modsec.sock \
   --rules /etc/modsecurity/crs/crs-setup.conf \
   --rules "/etc/modsecurity/crs/rules/*.conf"
 ```
@@ -155,7 +155,7 @@ sentinel-modsec-agent \
 **Using environment variables:**
 ```bash
 export MODSEC_RULES="/etc/modsecurity/crs/crs-setup.conf,/etc/modsecurity/crs/rules/*.conf"
-sentinel-modsec-agent --socket /var/run/sentinel/modsec.sock
+zentinel-modsec-agent --socket /var/run/zentinel/modsec.sock
 ```
 
 ### Step 5: Custom Rules (Optional)
@@ -180,8 +180,8 @@ EOF
 
 **Load order with custom rules:**
 ```bash
-sentinel-modsec-agent \
-  --socket /var/run/sentinel/modsec.sock \
+zentinel-modsec-agent \
+  --socket /var/run/zentinel/modsec.sock \
   --rules /etc/modsecurity/crs/crs-setup.conf \
   --rules "/etc/modsecurity/crs/rules/REQUEST-901-INITIALIZATION.conf" \
   --rules "/etc/modsecurity/custom/custom-rules.conf" \
@@ -195,8 +195,8 @@ For testing or minimal setups, you can load only specific rule categories:
 
 ```bash
 # SQLi and XSS protection only
-sentinel-modsec-agent \
-  --socket /var/run/sentinel/modsec.sock \
+zentinel-modsec-agent \
+  --socket /var/run/zentinel/modsec.sock \
   --rules /etc/modsecurity/crs/crs-setup.conf \
   --rules /etc/modsecurity/crs/rules/REQUEST-901-INITIALIZATION.conf \
   --rules /etc/modsecurity/crs/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf \
@@ -207,8 +207,8 @@ sentinel-modsec-agent \
 ## Usage
 
 ```bash
-sentinel-modsec-agent \
-  --socket /var/run/sentinel/modsec.sock \
+zentinel-modsec-agent \
+  --socket /var/run/zentinel/modsec.sock \
   --rules /etc/modsecurity/crs/crs-setup.conf \
   --rules "/etc/modsecurity/crs/rules/*.conf"
 ```
@@ -217,7 +217,7 @@ sentinel-modsec-agent \
 
 | Option | Environment Variable | Description | Default |
 |--------|---------------------|-------------|---------|
-| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/sentinel-modsec.sock` |
+| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-modsec.sock` |
 | `--rules` | `MODSEC_RULES` | Paths to rule files (comma-separated or multiple flags) | - |
 | `--block-mode` | `MODSEC_BLOCK_MODE` | Block (true) or detect-only (false) | `true` |
 | `--exclude-paths` | `MODSEC_EXCLUDE_PATHS` | Paths to exclude (comma-separated) | - |
@@ -228,14 +228,14 @@ sentinel-modsec-agent \
 
 ## Configuration
 
-### Sentinel Proxy Configuration
+### Zentinel Proxy Configuration
 
 ```kdl
 agents {
     agent "modsec" {
         type "custom"
         transport "unix_socket" {
-            path "/var/run/sentinel/modsec.sock"
+            path "/var/run/zentinel/modsec.sock"
         }
         events ["request_headers", "request_body_chunk", "response_body_chunk"]
         timeout-ms 100
@@ -299,7 +299,7 @@ SecAction "id:900001,phase:1,pass,t:none,nolog,setvar:tx.detection_paranoia_leve
 
 1. **Start with detect-only mode** to identify false positives:
    ```bash
-   sentinel-modsec-agent --block-mode=false --rules ...
+   zentinel-modsec-agent --block-mode=false --rules ...
    ```
 
 2. **Begin at Paranoia Level 1** and monitor logs
@@ -327,9 +327,9 @@ SecRule ARGS:content "@rx .*" \
     "id:1002,phase:2,pass,nolog,ctl:ruleRemoveTargetById=941100;ARGS:content"
 ```
 
-## Comparison with sentinel-agent-waf
+## Comparison with zentinel-agent-waf
 
-| Feature | sentinel-agent-modsec | sentinel-agent-waf |
+| Feature | zentinel-agent-modsec | zentinel-agent-waf |
 |---------|----------------------|-------------------|
 | Detection Rules | 800+ CRS rules | ~20 regex rules |
 | SecLang Support | ✓ | - |
@@ -345,7 +345,7 @@ SecRule ARGS:content "@rx .*" \
 - You have existing ModSecurity/SecLang rules
 - You require comprehensive protection with 800+ detection rules
 
-**When to use [sentinel-agent-waf](https://github.com/raskell-io/sentinel-agent-waf):**
+**When to use [zentinel-agent-waf](https://github.com/zentinelproxy/zentinel-agent-waf):**
 - You want simple, zero-dependency deployment
 - You need low latency and minimal resource usage
 - Basic attack detection is sufficient

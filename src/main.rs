@@ -1,4 +1,4 @@
-//! Sentinel ModSecurity Agent CLI
+//! Zentinel ModSecurity Agent CLI
 //!
 //! Command-line interface for the ModSecurity WAF agent.
 //!
@@ -10,18 +10,18 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing::info;
 
-use sentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-use sentinel_agent_protocol::{AgentServer, v2::GrpcAgentServerV2};
+use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
+use zentinel_agent_protocol::{AgentServer, v2::GrpcAgentServerV2};
 
 /// Command line arguments
 #[derive(Parser, Debug)]
-#[command(name = "sentinel-modsec-agent")]
-#[command(about = "ModSecurity WAF agent for Sentinel reverse proxy - full OWASP CRS support")]
+#[command(name = "zentinel-modsec-agent")]
+#[command(about = "ModSecurity WAF agent for Zentinel reverse proxy - full OWASP CRS support")]
 struct Args {
     /// Path to Unix socket (mutually exclusive with --grpc-address)
     #[arg(
         long,
-        default_value = "/tmp/sentinel-modsec.sock",
+        default_value = "/tmp/zentinel-modsec.sock",
         env = "AGENT_SOCKET"
     )]
     socket: PathBuf,
@@ -87,14 +87,14 @@ async fn main() -> Result<()> {
     let log_level = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(format!(
-            "{}={},sentinel_agent_protocol=info",
+            "{}={},zentinel_agent_protocol=info",
             env!("CARGO_CRATE_NAME"),
             log_level
         ))
         .json()
         .init();
 
-    info!("Starting Sentinel ModSecurity Agent");
+    info!("Starting Zentinel ModSecurity Agent");
 
     // Build configuration
     let config = args.to_config();
@@ -122,12 +122,12 @@ async fn main() -> Result<()> {
     if let Some(grpc_addr) = args.grpc_address {
         // gRPC transport (v2 protocol)
         info!(address = %grpc_addr, "Starting gRPC v2 agent server");
-        let server = GrpcAgentServerV2::new("sentinel-modsec-agent", Box::new(agent));
+        let server = GrpcAgentServerV2::new("zentinel-modsec-agent", Box::new(agent));
         server.run(grpc_addr).await.map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         // UDS transport (v1 protocol - for backward compatibility)
         info!(socket = ?args.socket, "Starting UDS agent server");
-        let server = AgentServer::new("sentinel-modsec-agent", args.socket, Box::new(agent));
+        let server = AgentServer::new("zentinel-modsec-agent", args.socket, Box::new(agent));
         server.run().await.map_err(|e| anyhow::anyhow!("{}", e))?;
     }
 
