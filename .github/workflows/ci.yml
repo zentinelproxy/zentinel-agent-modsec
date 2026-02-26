@@ -1,173 +1,83 @@
 name: CI
 
-# DISABLED: Uncomment triggers below when ready to enable CI
-# on:
-#   push:
-#     branches: [main]
-#   pull_request:
-#     branches: [main]
-
-# Manual trigger only (for now)
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: Check
-    runs-on: ubuntu-latest
-    # DISABLED: Set to true to enable
-    if: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-action@stable
-
-      - name: Install libmodsecurity
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libmodsecurity-dev
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run cargo check
-        run: cargo check --all-features
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    # DISABLED: Set to true to enable
-    if: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-action@stable
-
-      - name: Install libmodsecurity
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libmodsecurity-dev
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run tests (without CRS)
-        run: cargo test --test integration
-
-      - name: Download OWASP CRS
-        run: |
-          git clone --depth 1 --branch v4.0.0 https://github.com/coreruleset/coreruleset testdata/crs
-          cp testdata/crs/crs-setup.conf.example testdata/crs/crs-setup.conf
-
-      - name: Run CRS tests
-        run: cargo test --test crs_integration
-
   fmt:
-    name: Format
+    name: Formatting
     runs-on: ubuntu-latest
-    # DISABLED: Set to true to enable
-    if: false
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-action@stable
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-
-      - name: Run cargo fmt
-        run: cargo fmt --all -- --check
+      - run: cargo fmt --all --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    # DISABLED: Set to true to enable
-    if: false
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-action@stable
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-registry-
+      - uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-clippy-
       - name: Install libmodsecurity
         run: |
           sudo apt-get update
           sudo apt-get install -y libmodsecurity-dev
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Run clippy
-        run: cargo clippy --all-features -- -D warnings
-
-  # Uncomment to enable build artifacts
-  # build:
-  #   name: Build Release
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     matrix:
-  #       include:
-  #         - os: ubuntu-latest
-  #           target: x86_64-unknown-linux-gnu
-  #         - os: macos-latest
-  #           target: x86_64-apple-darwin
-  #         - os: macos-latest
-  #           target: aarch64-apple-darwin
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #
-  #     - name: Install Rust
-  #       uses: dtolnay/rust-action@stable
-  #       with:
-  #         targets: ${{ matrix.target }}
-  #
-  #     - name: Install libmodsecurity (Ubuntu)
-  #       if: matrix.os == 'ubuntu-latest'
-  #       run: |
-  #         sudo apt-get update
-  #         sudo apt-get install -y libmodsecurity-dev
-  #
-  #     - name: Install libmodsecurity (macOS)
-  #       if: matrix.os == 'macos-latest'
-  #       run: brew install modsecurity
-  #
-  #     - name: Build release
-  #       run: cargo build --release --target ${{ matrix.target }}
-  #
-  #     - name: Upload artifact
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: zentinel-modsec-agent-${{ matrix.target }}
-  #         path: target/${{ matrix.target }}/release/zentinel-modsec-agent
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-registry-
+      - uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+      - name: Install libmodsecurity
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmodsecurity-dev
+      - run: cargo test --workspace
