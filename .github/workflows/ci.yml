@@ -51,7 +51,7 @@ jobs:
       - name: Install libmodsecurity
         run: |
           sudo apt-get update
-          sudo apt-get install -y libmodsecurity-dev
+          sudo apt-get install -y libmodsecurity-dev protobuf-compiler
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -79,5 +79,5 @@ jobs:
       - name: Install libmodsecurity
         run: |
           sudo apt-get update
-          sudo apt-get install -y libmodsecurity-dev
+          sudo apt-get install -y libmodsecurity-dev protobuf-compiler
       - run: cargo test --workspace
