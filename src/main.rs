@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use tracing::info;
 
 use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-use zentinel_agent_protocol::{AgentServer, v2::GrpcAgentServerV2};
+use zentinel_agent_protocol::v2::{GrpcAgentServerV2, UdsAgentServerV2};
 
 /// Command line arguments
 #[derive(Parser, Debug)]
@@ -125,9 +125,9 @@ async fn main() -> Result<()> {
         let server = GrpcAgentServerV2::new("zentinel-modsec-agent", Box::new(agent));
         server.run(grpc_addr).await.map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
-        // UDS transport (v1 protocol - for backward compatibility)
+        // UDS transport (v2 protocol)
         info!(socket = ?args.socket, "Starting UDS agent server");
-        let server = AgentServer::new("zentinel-modsec-agent", args.socket, Box::new(agent));
+        let server = UdsAgentServerV2::new("zentinel-modsec-agent", args.socket, Box::new(agent));
         server.run().await.map_err(|e| anyhow::anyhow!("{}", e))?;
     }
 

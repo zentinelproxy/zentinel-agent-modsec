@@ -7,14 +7,14 @@
 //!
 //! ```ignore
 //! use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-//! use zentinel_agent_protocol::AgentServer;
+//! use zentinel_agent_protocol::v2::UdsAgentServerV2;
 //!
 //! let config = ModSecConfig {
 //!     rules_paths: vec!["/etc/modsecurity/crs/rules/*.conf".to_string()],
 //!     ..Default::default()
 //! };
 //! let agent = ModSecAgent::new(config)?;
-//! let server = AgentServer::new("modsec", "/tmp/modsec.sock", Box::new(agent));
+//! let server = UdsAgentServerV2::new("modsec", "/tmp/modsec.sock", Box::new(agent));
 //! server.run().await?;
 //! ```
 
@@ -29,7 +29,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use zentinel_agent_protocol::{
-    AgentHandler, AgentResponse, AuditMetadata, ConfigureEvent, HeaderOp, RequestBodyChunkEvent,
+    AgentResponse, AuditMetadata, HeaderOp, RequestBodyChunkEvent,
     RequestHeadersEvent, ResponseBodyChunkEvent, ResponseHeadersEvent, EventType,
     v2::{
         AgentCapabilities, AgentFeatures, AgentHandlerV2, AgentLimits, DrainReason,
@@ -623,41 +623,6 @@ impl AgentHandlerV2 for ModSecAgent {
         // ModSecurity can inspect response bodies but the API is more complex
         let _ = event;
         AgentResponse::default_allow()
-    }
-}
-
-/// v1 AgentHandler implementation for backward compatibility with UDS transport.
-///
-/// This delegates to the v2 implementation methods for the core event handling,
-/// allowing the agent to work with both v1 (UDS) and v2 (gRPC) servers.
-#[async_trait::async_trait]
-impl AgentHandler for ModSecAgent {
-    async fn on_configure(&self, event: ConfigureEvent) -> AgentResponse {
-        // Delegate to v2 configure, converting result to AgentResponse
-        let accepted = <Self as AgentHandlerV2>::on_configure(self, event.config, None).await;
-        if accepted {
-            AgentResponse::default_allow()
-        } else {
-            // v1 doesn't have a way to signal config rejection, so just return allow
-            // but the warning is logged in the v2 method
-            AgentResponse::default_allow()
-        }
-    }
-
-    async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
-        <Self as AgentHandlerV2>::on_request_headers(self, event).await
-    }
-
-    async fn on_request_body_chunk(&self, event: RequestBodyChunkEvent) -> AgentResponse {
-        <Self as AgentHandlerV2>::on_request_body_chunk(self, event).await
-    }
-
-    async fn on_response_headers(&self, event: ResponseHeadersEvent) -> AgentResponse {
-        <Self as AgentHandlerV2>::on_response_headers(self, event).await
-    }
-
-    async fn on_response_body_chunk(&self, event: ResponseBodyChunkEvent) -> AgentResponse {
-        <Self as AgentHandlerV2>::on_response_body_chunk(self, event).await
     }
 }
 

@@ -41,13 +41,25 @@ make && make install
 
 ## Installation
 
-### From crates.io
+### Using Bundle (Recommended)
+
+```bash
+# Install just this agent
+zentinel bundle install modsec
+
+# Or install all bundled agents
+zentinel bundle install
+```
+
+The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://zentinelproxy.io/docs/deployment/bundle/) for details.
+
+### Using Cargo
 
 ```bash
 cargo install zentinel-agent-modsec
 ```
 
-### From source
+### From Source
 
 ```bash
 git clone https://github.com/zentinelproxy/zentinel-agent-modsec
@@ -237,7 +249,7 @@ agents {
         transport "unix_socket" {
             path "/var/run/zentinel/modsec.sock"
         }
-        events ["request_headers", "request_body_chunk", "response_body_chunk"]
+        events "request_headers" "request_body_chunk" "response_body_chunk"
         timeout-ms 100
         failure-mode "open"
     }
@@ -247,7 +259,7 @@ routes {
     route "all" {
         matches { path-prefix "/" }
         upstream "backend"
-        agents ["modsec"]
+        agents "modsec"
     }
 }
 ```
