@@ -63,7 +63,7 @@ jobs:
             /usr/local/lib/libmodsecurity*
             /usr/local/lib/pkgconfig/modsecurity.pc
             /usr/local/include/modsecurity
-          key: ${{ runner.os }}-libmodsecurity-3.0.14
+          key: ${{ runner.os }}-libmodsecurity-3.0.14-v2
       - name: Build libmodsecurity from source
         if: steps.cache-modsec.outputs.cache-hit != 'true'
         run: |
@@ -71,7 +71,7 @@ jobs:
           cd /tmp/modsecurity
           git submodule init && git submodule update
           ./build.sh
-          ./configure --without-lmdb
+          ./configure --prefix=/usr/local --without-lmdb
           make -j$(nproc)
           sudo make install
       - name: Update linker cache
@@ -113,7 +113,7 @@ jobs:
             /usr/local/lib/libmodsecurity*
             /usr/local/lib/pkgconfig/modsecurity.pc
             /usr/local/include/modsecurity
-          key: ${{ runner.os }}-libmodsecurity-3.0.14
+          key: ${{ runner.os }}-libmodsecurity-3.0.14-v2
       - name: Build libmodsecurity from source
         if: steps.cache-modsec.outputs.cache-hit != 'true'
         run: |
@@ -121,7 +121,7 @@ jobs:
           cd /tmp/modsecurity
           git submodule init && git submodule update
           ./build.sh
-          ./configure --without-lmdb
+          ./configure --prefix=/usr/local --without-lmdb
           make -j$(nproc)
           sudo make install
       - name: Update linker cache
