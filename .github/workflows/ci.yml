@@ -12,6 +12,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
+  LD_LIBRARY_PATH: /usr/local/lib
 
 jobs:
   fmt:
