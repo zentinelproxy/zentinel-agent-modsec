@@ -192,7 +192,7 @@ fn is_allow(decision: &Decision) -> bool {
 #[tokio::test]
 async fn test_sqli_in_query_string_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/search?id=' OR '1'='1", HashMap::new());
     let response = client
@@ -215,7 +215,7 @@ async fn test_sqli_in_query_string_blocked() {
 #[tokio::test]
 async fn test_sqli_union_select_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/api?q=1 UNION SELECT * FROM users", HashMap::new());
     let response = client
@@ -246,7 +246,7 @@ async fn test_sqli_detect_only_mode() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/search?id=' OR '1'='1", HashMap::new());
     let response = client
@@ -271,7 +271,7 @@ async fn test_sqli_detect_only_mode() {
 #[tokio::test]
 async fn test_xss_script_tag_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/page?name=<script>alert('xss')</script>", HashMap::new());
     let response = client
@@ -285,7 +285,7 @@ async fn test_xss_script_tag_blocked() {
 #[tokio::test]
 async fn test_xss_event_handler_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/page?input=<img src=x onerror=alert(1)>", HashMap::new());
     let response = client
@@ -299,7 +299,7 @@ async fn test_xss_event_handler_blocked() {
 #[tokio::test]
 async fn test_xss_javascript_uri_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/redirect?url=javascript:alert(1)", HashMap::new());
     let response = client
@@ -313,7 +313,7 @@ async fn test_xss_javascript_uri_blocked() {
 #[tokio::test]
 async fn test_xss_in_header_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -337,7 +337,7 @@ async fn test_xss_in_header_blocked() {
 #[tokio::test]
 async fn test_path_traversal_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/files/../../../etc/passwd", HashMap::new());
     let response = client
@@ -351,7 +351,7 @@ async fn test_path_traversal_blocked() {
 #[tokio::test]
 async fn test_path_traversal_encoded_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/files/%2e%2e%2f%2e%2e%2fetc/passwd", HashMap::new());
     let response = client
@@ -369,7 +369,7 @@ async fn test_path_traversal_encoded_blocked() {
 #[tokio::test]
 async fn test_command_injection_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/run?cmd=`whoami`", HashMap::new());
     let response = client
@@ -383,7 +383,7 @@ async fn test_command_injection_blocked() {
 #[tokio::test]
 async fn test_command_injection_pipe_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("/exec?input=foo | cat /etc/passwd", HashMap::new());
     let response = client
@@ -418,7 +418,7 @@ async fn test_excluded_path_allows_attack() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // Attack on excluded path should be allowed
     let event = make_request_headers("/health?id=' OR '1'='1", HashMap::new());
@@ -450,7 +450,7 @@ async fn test_non_excluded_path_blocks_attack() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // Attack on non-excluded path should be blocked
     let event = make_request_headers("/api?id=' OR '1'='1", HashMap::new());
@@ -469,7 +469,7 @@ async fn test_non_excluded_path_blocks_attack() {
 #[tokio::test]
 async fn test_body_sqli_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // First send headers (will pass)
     let headers_event = make_request_headers("/api/users", HashMap::new());
@@ -496,7 +496,7 @@ async fn test_body_sqli_blocked() {
 #[tokio::test]
 async fn test_body_xss_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let headers_event = make_request_headers("/api/comments", HashMap::new());
     let _ = client
@@ -537,7 +537,7 @@ async fn test_body_inspection_disabled_allows_attack() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let headers_event = make_request_headers("/api/users", HashMap::new());
     let _ = client
@@ -579,7 +579,7 @@ async fn test_body_exceeds_max_size_skips_inspection() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let headers_event = make_request_headers("/api/upload", HashMap::new());
     let _ = client
@@ -609,7 +609,7 @@ async fn test_body_exceeds_max_size_skips_inspection() {
 #[tokio::test]
 async fn test_response_body_not_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let correlation_id = uuid::Uuid::new_v4().to_string();
     let response_body = make_response_body_chunk(
@@ -633,7 +633,7 @@ async fn test_response_body_not_blocked() {
 #[tokio::test]
 async fn test_clean_request_allowed() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert("User-Agent".to_string(), vec!["Mozilla/5.0".to_string()]);
@@ -652,7 +652,7 @@ async fn test_clean_request_allowed() {
 #[tokio::test]
 async fn test_clean_body_allowed() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let headers_event = make_request_headers("/api/users", HashMap::new());
     let _ = client
@@ -680,7 +680,7 @@ async fn test_clean_body_allowed() {
 #[tokio::test]
 async fn test_scanner_user_agent_blocked() {
     let (_dir, socket_path) = start_test_server_with_rules().await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert("User-Agent".to_string(), vec!["sqlmap/1.0".to_string()]);
@@ -705,7 +705,7 @@ async fn test_no_rules_allows_attack() {
         ..Default::default()
     };
     let (_dir, socket_path) = start_test_server(config).await;
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // Even attacks should be allowed without rules
     let event = make_request_headers("/search?id=' OR '1'='1", HashMap::new());

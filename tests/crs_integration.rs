@@ -58,16 +58,15 @@ async fn start_crs_server(config: ModSecConfig) -> Option<(tempfile::TempDir, st
 
 /// Create a client connected to the test server
 async fn create_client(socket_path: &std::path::Path) -> AgentClientV2Uds {
-    AgentClientV2Uds::new(
+    let client = AgentClientV2Uds::new(
         "test-client",
         socket_path.to_string_lossy().to_string(),
         Duration::from_secs(5),
     )
     .await
-    .expect("Failed to create agent client")
-    .connect()
-    .await
-    .expect("Failed to connect to agent")
+    .expect("Failed to create agent client");
+    client.connect().await.expect("Failed to connect to agent");
+    client
 }
 
 /// Create a basic request metadata
@@ -141,7 +140,7 @@ async fn test_crs_sqli_union_select() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // Classic UNION-based SQL injection
     let event = make_request_headers(
@@ -173,7 +172,7 @@ async fn test_crs_sqli_boolean_based() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // Boolean-based blind SQL injection
     let event = make_request_headers("GET", "/user?id=1' AND '1'='1", HashMap::new());
@@ -201,7 +200,7 @@ async fn test_crs_sqli_time_based() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // Time-based blind SQL injection
     let event = make_request_headers("GET", "/api?id=1; WAITFOR DELAY '0:0:5'--", HashMap::new());
@@ -233,7 +232,7 @@ async fn test_crs_xss_script_tag() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers(
         "GET",
@@ -264,7 +263,7 @@ async fn test_crs_xss_event_handler() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers(
         "GET",
@@ -295,7 +294,7 @@ async fn test_crs_xss_svg_onload() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("GET", "/page?data=<svg onload=alert(1)>", HashMap::new());
     let response = client
@@ -326,7 +325,7 @@ async fn test_crs_path_traversal_etc_passwd() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("GET", "/download?file=../../../etc/passwd", HashMap::new());
     let response = client
@@ -353,7 +352,7 @@ async fn test_crs_path_traversal_windows() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers(
         "GET",
@@ -391,7 +390,7 @@ async fn test_crs_command_injection_semicolon() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers(
         "GET",
@@ -425,7 +424,7 @@ async fn test_crs_command_injection_backticks() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("GET", "/run?cmd=`id`", HashMap::new());
     let response = client
@@ -455,7 +454,7 @@ async fn test_crs_command_injection_pipe() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let event = make_request_headers("GET", "/exec?input=test | whoami", HashMap::new());
     let response = client
@@ -489,7 +488,7 @@ async fn test_crs_scanner_sqlmap() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -522,7 +521,7 @@ async fn test_crs_scanner_nikto() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -559,7 +558,7 @@ async fn test_crs_http_request_smuggling() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -594,7 +593,7 @@ async fn test_crs_sqli_in_json_body() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -635,7 +634,7 @@ async fn test_crs_xss_in_form_body() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -679,7 +678,7 @@ async fn test_crs_clean_get_request() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -714,7 +713,7 @@ async fn test_crs_clean_post_request() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     let mut headers = HashMap::new();
     headers.insert(
@@ -760,7 +759,7 @@ async fn test_crs_detect_only_mode() {
         return;
     };
 
-    let mut client = create_client(&socket_path).await;
+    let client = create_client(&socket_path).await;
 
     // Send a malicious request
     let event = make_request_headers(
