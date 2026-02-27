@@ -4,16 +4,15 @@
 //! The CRS must be present in testdata/crs/ for these tests to run.
 
 use base64::Engine;
-use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-use zentinel_agent_protocol::{
-    Decision, RequestBodyChunkEvent, RequestHeadersEvent,
-    RequestMetadata,
-    v2::{AgentClientV2Uds, UdsAgentServerV2},
-};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
+use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
+use zentinel_agent_protocol::{
+    v2::{AgentClientV2Uds, UdsAgentServerV2},
+    Decision, RequestBodyChunkEvent, RequestHeadersEvent, RequestMetadata,
+};
 
 /// Check if CRS is available
 fn crs_available() -> bool {
@@ -59,12 +58,16 @@ async fn start_crs_server(config: ModSecConfig) -> Option<(tempfile::TempDir, st
 
 /// Create a client connected to the test server
 async fn create_client(socket_path: &std::path::Path) -> AgentClientV2Uds {
-    AgentClientV2Uds::new("test-client", socket_path.to_string_lossy().to_string(), Duration::from_secs(5))
-        .await
-        .expect("Failed to create agent client")
-        .connect()
-        .await
-        .expect("Failed to connect to agent")
+    AgentClientV2Uds::new(
+        "test-client",
+        socket_path.to_string_lossy().to_string(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed to create agent client")
+    .connect()
+    .await
+    .expect("Failed to connect to agent")
 }
 
 /// Create a basic request metadata

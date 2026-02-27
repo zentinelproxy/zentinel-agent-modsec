@@ -123,7 +123,10 @@ async fn main() -> Result<()> {
         // gRPC transport (v2 protocol)
         info!(address = %grpc_addr, "Starting gRPC v2 agent server");
         let server = GrpcAgentServerV2::new("zentinel-modsec-agent", Box::new(agent));
-        server.run(grpc_addr).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        server
+            .run(grpc_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
     } else {
         // UDS transport (v2 protocol)
         info!(socket = ?args.socket, "Starting UDS agent server");

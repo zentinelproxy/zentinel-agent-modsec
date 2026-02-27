@@ -7,16 +7,15 @@
 //! you would typically use the full OWASP CRS ruleset.
 
 use base64::Engine;
-use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
-use zentinel_agent_protocol::{
-    Decision, RequestBodyChunkEvent, RequestHeadersEvent,
-    RequestMetadata, ResponseBodyChunkEvent,
-    v2::{AgentClientV2Uds, UdsAgentServerV2},
-};
 use std::collections::HashMap;
 use std::io::Write;
 use std::time::Duration;
 use tempfile::tempdir;
+use zentinel_agent_modsec::{ModSecAgent, ModSecConfig};
+use zentinel_agent_protocol::{
+    v2::{AgentClientV2Uds, UdsAgentServerV2},
+    Decision, RequestBodyChunkEvent, RequestHeadersEvent, RequestMetadata, ResponseBodyChunkEvent,
+};
 
 /// Basic ModSecurity rules for testing
 /// These are simplified rules that mirror common attack patterns
@@ -108,12 +107,15 @@ async fn start_test_server_with_rules() -> (tempfile::TempDir, std::path::PathBu
 
 /// Create a client connected to the test server
 async fn create_client(socket_path: &std::path::Path) -> AgentClientV2Uds {
-    AgentClientV2Uds::new("test-client", socket_path.to_string_lossy().to_string(), Duration::from_secs(5))
-        .await
-        .expect("Failed to create agent client")
-        .connect()
-        .await
-        .expect("Failed to connect to agent")
+    let client = AgentClientV2Uds::new(
+        "test-client",
+        socket_path.to_string_lossy().to_string(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed to create agent client");
+    client.connect().await.expect("Failed to connect to agent");
+    client
 }
 
 /// Create a basic request metadata

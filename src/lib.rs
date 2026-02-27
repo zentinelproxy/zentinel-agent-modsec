@@ -29,12 +29,12 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use zentinel_agent_protocol::{
-    AgentResponse, AuditMetadata, HeaderOp, RequestBodyChunkEvent,
-    RequestHeadersEvent, ResponseBodyChunkEvent, ResponseHeadersEvent, EventType,
     v2::{
-        AgentCapabilities, AgentFeatures, AgentHandlerV2, AgentLimits, DrainReason,
-        HealthStatus, MetricsReport, ShutdownReason,
+        AgentCapabilities, AgentFeatures, AgentHandlerV2, AgentLimits, DrainReason, HealthStatus,
+        MetricsReport, ShutdownReason,
     },
+    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestBodyChunkEvent, RequestHeadersEvent,
+    ResponseBodyChunkEvent, ResponseHeadersEvent,
 };
 
 /// ModSecurity configuration
