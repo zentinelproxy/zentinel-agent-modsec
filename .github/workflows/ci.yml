@@ -48,10 +48,32 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
-      - name: Install libmodsecurity
+      - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libmodsecurity-dev protobuf-compiler
+          sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
+            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
+      - name: Cache libmodsecurity
+        id: cache-modsec
+        uses: actions/cache@v5
+        with:
+          path: |
+            /usr/local/lib/libmodsecurity*
+            /usr/local/lib/pkgconfig/modsecurity.pc
+            /usr/local/include/modsecurity
+          key: ${{ runner.os }}-libmodsecurity-3.0.14
+      - name: Build libmodsecurity from source
+        if: steps.cache-modsec.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v3.0.14 https://github.com/owasp-modsecurity/ModSecurity.git /tmp/modsecurity
+          cd /tmp/modsecurity
+          git submodule init && git submodule update
+          ./build.sh
+          ./configure --without-lmdb
+          make -j$(nproc)
+          sudo make install
+      - name: Update linker cache
+        run: sudo ldconfig
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
@@ -76,8 +98,30 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
-      - name: Install libmodsecurity
+      - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libmodsecurity-dev protobuf-compiler
+          sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
+            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
+      - name: Cache libmodsecurity
+        id: cache-modsec
+        uses: actions/cache@v5
+        with:
+          path: |
+            /usr/local/lib/libmodsecurity*
+            /usr/local/lib/pkgconfig/modsecurity.pc
+            /usr/local/include/modsecurity
+          key: ${{ runner.os }}-libmodsecurity-3.0.14
+      - name: Build libmodsecurity from source
+        if: steps.cache-modsec.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v3.0.14 https://github.com/owasp-modsecurity/ModSecurity.git /tmp/modsecurity
+          cd /tmp/modsecurity
+          git submodule init && git submodule update
+          ./build.sh
+          ./configure --without-lmdb
+          make -j$(nproc)
+          sudo make install
+      - name: Update linker cache
+        run: sudo ldconfig
       - run: cargo test --workspace
