@@ -52,7 +52,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
-            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
+            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
       - name: Cache libmodsecurity
         id: cache-modsec
         uses: actions/cache@v5
@@ -102,7 +102,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
-            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
+            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
       - name: Cache libmodsecurity
         id: cache-modsec
         uses: actions/cache@v5
