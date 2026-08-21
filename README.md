@@ -51,13 +51,25 @@ zentinel bundle install modsec
 zentinel bundle install
 ```
 
-The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://zentinelproxy.io/docs/deployment/bundle/) for details.
+The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/) for details.
 
 ### Using Cargo
 
+`zentinel-agent-modsec` is not published on crates.io, so `cargo install zentinel-agent-modsec` does not
+work. Install straight from the repository instead:
+
 ```bash
-cargo install zentinel-agent-modsec
+cargo install --git https://github.com/zentinelproxy/zentinel-agent-modsec
 ```
+
+This builds and installs the `zentinel-modsec-agent` binary.
+
+### Prebuilt Binaries
+
+Prebuilt binaries are attached to the
+[releases](https://github.com/zentinelproxy/zentinel-agent-modsec/releases). Asset names and
+the platforms covered vary between releases, so download the asset matching your
+platform from the release page and `install -m 0755` it into your `PATH`.
 
 ### From Source
 
