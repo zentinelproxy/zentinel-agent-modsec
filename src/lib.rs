@@ -23,7 +23,6 @@ use base64::Engine;
 use modsecurity::{ModSecurity, Rules};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -33,8 +32,8 @@ use zentinel_agent_protocol::{
         AgentCapabilities, AgentFeatures, AgentHandlerV2, AgentLimits, DrainReason, HealthStatus,
         MetricsReport, ShutdownReason,
     },
-    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestBodyChunkEvent, RequestHeadersEvent,
-    ResponseBodyChunkEvent, ResponseHeadersEvent,
+    AgentResponse, AuditMetadata, EventType, HeaderOp, RequestBodyChunkEvent, RequestCompleteEvent,
+    RequestHeadersEvent, ResponseBodyChunkEvent, ResponseHeadersEvent,
 };
 
 /// ModSecurity configuration
@@ -145,6 +144,28 @@ impl ModSecEngine {
             .add_plain("SecRuleEngine On")
             .map_err(|e| anyhow::anyhow!("Failed to enable SecRuleEngine: {}", e))?;
 
+        // Without SecRequestBodyAccess, libmodsecurity never parses the body
+        // it is given, so ARGS_POST / REQUEST_BODY stay empty and no body rule
+        // can match. Stock CRS does not set it (modsecurity.conf does), so set
+        // it here whenever body inspection is on; a rule file may still
+        // override it.
+        if config.body_inspection_enabled {
+            rules
+                .add_plain("SecRequestBodyAccess On")
+                .map_err(|e| anyhow::anyhow!("Failed to enable SecRequestBodyAccess: {}", e))?;
+            // The body processors from modsecurity.conf-recommended (same
+            // ids). Without them a JSON or XML body is never parsed into
+            // ARGS, which is what the CRS injection rules inspect.
+            rules
+                .add_plain(concat!(
+                    "SecRule REQUEST_HEADERS:Content-Type \"^(?:application(?:/soap\\+|/)|text/)xml\" ",
+                    "\"id:200000,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=XML\"\n",
+                    "SecRule REQUEST_HEADERS:Content-Type \"^application/json\" ",
+                    "\"id:200001,phase:1,t:none,t:lowercase,pass,nolog,ctl:requestBodyProcessor=JSON\""
+                ))
+                .map_err(|e| anyhow::anyhow!("Failed to add body processor rules: {}", e))?;
+        }
+
         // Load rules from configured paths
         let mut loaded_count = 0;
         for path_pattern in &config.rules_paths {
@@ -156,10 +177,13 @@ impl ModSecEngine {
                 match entry {
                     Ok(path) => {
                         if path.is_file() {
-                            let content = fs::read_to_string(&path).map_err(|e| {
-                                anyhow::anyhow!("Failed to read rule file {:?}: {}", path, e)
-                            })?;
-                            rules.add_plain(&content).map_err(|e| {
+                            // Load by path, not by contents: libmodsecurity
+                            // resolves `@pmFromFile` and other relative data
+                            // files against the rule file's directory, which
+                            // it only knows when given the file. Passing the
+                            // text made stock CRS fail on its first data file
+                            // (REQUEST-913, scanners-user-agents.data).
+                            rules.add_file(&path).map_err(|e| {
                                 anyhow::anyhow!("Failed to parse rules from {:?}: {}", path, e)
                             })?;
                             loaded_count += 1;
@@ -286,25 +310,30 @@ impl ModSecAgent {
             }
         }
 
-        // Process body if provided (phase 2)
+        // Phase 2. `None` means a body is still coming and will be processed
+        // by a later call; `Some` (possibly empty) runs phase 2 now. Phase 2
+        // must run even without a body: CRS evaluates ARGS (the query
+        // string) for SQLi/XSS, and makes its anomaly-score blocking
+        // decision (949110), in phase 2. Skipping it for bodyless requests
+        // meant no GET was ever blocked under stock CRS.
         if let Some(body_data) = body {
             if !body_data.is_empty() {
                 tx.append_request_body(body_data)
                     .map_err(|e| anyhow::anyhow!("append_request_body failed: {}", e))?;
-                tx.process_request_body()
-                    .map_err(|e| anyhow::anyhow!("process_request_body failed: {}", e))?;
+            }
+            tx.process_request_body()
+                .map_err(|e| anyhow::anyhow!("process_request_body failed: {}", e))?;
 
-                // Check for intervention after body
-                if let Some(intervention) = tx.intervention() {
-                    let status = intervention.status() as u16;
-                    if status != 0 && status != 200 {
-                        debug!(
-                            correlation_id = correlation_id,
-                            status = status,
-                            "ModSecurity intervention (body)"
-                        );
-                        return Ok(Some((status, "Blocked by ModSecurity".to_string())));
-                    }
+            // Check for intervention after body
+            if let Some(intervention) = tx.intervention() {
+                let status = intervention.status() as u16;
+                if status != 0 && status != 200 {
+                    debug!(
+                        correlation_id = correlation_id,
+                        status = status,
+                        "ModSecurity intervention (body)"
+                    );
+                    return Ok(Some((status, "Blocked by ModSecurity".to_string())));
                 }
             }
         }
@@ -414,15 +443,24 @@ impl AgentHandlerV2 for ModSecAgent {
             }
         }
 
-        // Always process headers immediately (ModSecurity phase 1)
-        // This detects attacks in URI, query string, and headers
+        // Run phases 1 and 2 now, with an empty body, so attacks in the URI,
+        // query string and headers are decided here. With body inspection on,
+        // the whole transaction runs again with the body once it has arrived
+        // (on_request_body_chunk). Whether a body follows cannot be known from
+        // the headers (HTTP/2 needs no Content-Length), so always wait for it.
+        let defer_body = {
+            let engine = self.engine.read().await;
+            engine.config.body_inspection_enabled
+        };
+        let empty: &[u8] = &[];
+
         match self
             .process_request(
                 correlation_id,
                 &event.method,
                 &event.uri,
                 &event.headers,
-                None,
+                Some(empty),
                 &event.metadata.client_ip,
             )
             .await
@@ -467,9 +505,8 @@ impl AgentHandlerV2 for ModSecAgent {
                 }
             }
             Ok(None) => {
-                // Headers passed - if body inspection enabled, store for body processing
-                let engine = self.engine.read().await;
-                if engine.config.body_inspection_enabled {
+                // Headers passed - if a body is coming, store for body processing
+                if defer_body {
                     let mut pending = self.pending_requests.write().await;
                     pending.insert(
                         correlation_id.clone(),
@@ -489,6 +526,16 @@ impl AgentHandlerV2 for ModSecAgent {
                 AgentResponse::default_allow()
             }
         }
+    }
+
+    async fn on_request_complete(&self, event: RequestCompleteEvent) -> AgentResponse {
+        // A request that never sent a body leaves its pending entry behind;
+        // drop it when the proxy reports the request finished.
+        self.pending_requests
+            .write()
+            .await
+            .remove(&event.correlation_id);
+        AgentResponse::default_allow()
     }
 
     async fn on_response_headers(&self, _event: ResponseHeadersEvent) -> AgentResponse {
@@ -707,5 +754,52 @@ mod tests {
             intervention.is_none() || intervention.as_ref().map(|i| i.status()) == Some(200),
             "Clean request should not trigger intervention"
         );
+    }
+
+    /// Rules are loaded by path, so a relative `@pmFromFile` resolves next to
+    /// the rule file (stock CRS depends on this), and phase 2 runs for a
+    /// request without a body (CRS inspects ARGS and blocks in phase 2).
+    #[tokio::test]
+    async fn test_phase2_rule_with_data_file_blocks_bodyless_get() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("words.data"), "evilword\n").unwrap();
+        std::fs::write(
+            dir.path().join("rules.conf"),
+            r#"SecRule ARGS "@pmFromFile words.data" "id:10,phase:2,deny,status:403""#,
+        )
+        .unwrap();
+        let config = ModSecConfig {
+            rules_paths: vec![dir.path().join("*.conf").display().to_string()],
+            ..Default::default()
+        };
+        let agent = ModSecAgent::new(config).expect("rules with a data file must load");
+        let headers = HashMap::new();
+        let empty: &[u8] = &[];
+
+        let blocked = agent
+            .process_request(
+                "c1",
+                "GET",
+                "/s?q=evilword",
+                &headers,
+                Some(empty),
+                "127.0.0.1",
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.map(|(status, _)| status), Some(403));
+
+        let clean = agent
+            .process_request(
+                "c2",
+                "GET",
+                "/s?q=hello",
+                &headers,
+                Some(empty),
+                "127.0.0.1",
+            )
+            .await
+            .unwrap();
+        assert!(clean.is_none());
     }
 }
