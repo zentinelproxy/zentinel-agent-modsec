@@ -1,77 +1,193 @@
-# zentinel-agent-modsec
+<p align="center">
+  <a href="https://zentinelproxy.io">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
+      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+    </picture>
+  </a>
+</p>
 
-ModSecurity WAF agent for [Zentinel](https://github.com/zentinelproxy/zentinel) reverse proxy. Provides full OWASP Core Rule Set (CRS) support via libmodsecurity.
+<h3 align="center">ModSecurity agent</h3>
 
-> **Note:** This agent uses libmodsecurity bindings and requires the library to be installed on your system. For a lightweight, zero-dependency alternative with basic detection rules, see [zentinel-agent-waf](https://github.com/zentinelproxy/zentinel-agent-waf).
+<p align="center">Runs ModSecurity rules, including the OWASP Core Rule Set, through the C libmodsecurity library on request headers and bodies.</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/zentinelproxy/zentinel-agent-modsec/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/zentinelproxy/zentinel-agent-modsec/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-9b4d8a?style=flat&labelColor=1f161e">
+  <img alt="Rust: 1.94.1+" src="https://img.shields.io/badge/rust-1.94.1%2B-f68d31?style=flat&labelColor=1f161e&logo=rust&logoColor=white">
+  <img alt="Agent protocol: v2" src="https://img.shields.io/badge/agent%20protocol-v2-f68d31?style=flat&labelColor=1f161e">
+</p>
 
-- **Full OWASP CRS support** - 800+ detection rules
-- **SecLang compatibility** - Load any ModSecurity rules
-- **Request body inspection** - JSON, form data, XML, and all content types
-- **Response body inspection** - Detect data leakage (opt-in)
-- **Block or detect-only mode** - Monitor before blocking
-- **Path exclusions** - Skip inspection for trusted paths
+<p align="center">
+  <a href="https://registry.zentinelproxy.io/modsec/">Registry</a> &middot;
+  <a href="https://docs.zentinelproxy.io">Docs</a> &middot;
+  <a href="https://github.com/zentinelproxy">All repositories</a>
+</p>
 
-## Prerequisites
+This agent hands each request to [libmodsecurity](https://github.com/owasp-modsecurity/ModSecurity)
+3, the reference implementation of SecLang, and blocks with the status the rules
+ask for. Use it when you need the reference engine or already run ModSecurity
+rule sets. It links against the C library, so the library has to be installed
+wherever the agent runs.
 
-### libmodsecurity
+**Which ModSecurity agent?** This one wraps the C library. Its sibling
+[zentinel-agent-zentinelsec](https://github.com/zentinelproxy/zentinel-agent-zentinelsec)
+runs the same rule language on [zentinel-modsec](https://github.com/zentinelproxy/zentinel-modsec),
+a pure-Rust engine with no C dependency, whose CRS conformance is measured
+against the upstream regression suite. Choose this agent for the reference
+behavior, zentinelsec for a single static binary.
 
-This agent requires libmodsecurity >= 3.0.13 installed on your system:
+> **Known limitations** (checked against stock CRS on 2026-10-21):
+>
+> - Phase 2 rules run only when a request has a body. Most CRS detection, and
+>   the blocking evaluation in rule 949110, is phase 2, so an attack in the
+>   query string of a `GET` is detected by nothing and passes. `POST` bodies are
+>   inspected and blocked.
+> - Rule files are loaded as text, so data files that CRS references by
+>   relative path (`@pmFromFile scanners-user-agents.data`) are looked up in the
+>   working directory. Start the agent from the CRS `rules/` directory, or it
+>   exits at startup with `Failed to open file: 'scanners-user-agents.data'`.
+> - A body larger than `--max-body-size` is passed on uninspected.
+> - `--response-inspection` is accepted but response bodies are not inspected.
+> - The released binary (0.3.0, which `zentinel bundle install modsec` also
+>   installs) does not speak the current agent protocol: the proxy's handshake
+>   fails with `Invalid message format` and every request gets a 503. Build
+>   from `main` until a new release ships.
 
-**macOS:**
+## Quick start
+
 ```bash
+# 1. libmodsecurity (>= 3.0.13) and the OWASP CRS
+brew install modsecurity          # macOS; on Linux see Install
+sudo git clone https://github.com/coreruleset/coreruleset /etc/modsecurity/crs
+sudo cp /etc/modsecurity/crs/crs-setup.conf.example /etc/modsecurity/crs/crs-setup.conf
+
+# 2. The agent, built from main (see Known limitations)
+cargo install --git https://github.com/zentinelproxy/zentinel-agent-modsec
+
+# 3. Run it from the rules directory (see Known limitations)
+cd /etc/modsecurity/crs/rules
+zentinel-modsec-agent \
+  --socket /var/run/zentinel/modsec.sock \
+  --rules ../crs-setup.conf \
+  --rules "*.conf"
+```
+
+Then point Zentinel at the socket. Request bodies reach agents only when the
+top-level `waf` block enables body inspection:
+
+```kdl
+system {
+    worker-threads 0
+}
+
+listeners {
+    listener "http" {
+        address "127.0.0.1:8080"
+        protocol "http"
+    }
+}
+
+// Request bodies reach agents only when this block enables them.
+waf {
+    mode "off"
+    body-inspection {
+        inspect-request-body #true
+        max-inspection-bytes 1048576
+    }
+}
+
+agents {
+    agent "modsec" type="waf" {
+        unix-socket "/var/run/zentinel/modsec.sock"
+        events "request_headers" "request_body"
+        timeout-ms 200
+        failure-mode "closed"
+    }
+}
+
+filters {
+    filter "modsec" {
+        type "agent"
+        agent "modsec"
+        failure-mode "closed"
+    }
+}
+
+routes {
+    route "default" {
+        matches {
+            path-prefix "/"
+        }
+        upstream "backend"
+        filters "modsec"
+    }
+}
+
+upstreams {
+    upstream "backend" {
+        target "127.0.0.1:3000"
+    }
+}
+```
+
+`failure-mode "closed"` on the filter rejects requests while the agent is
+unreachable; use `"open"` to forward them uninspected instead.
+
+```bash
+curl -i -d "id=1' OR '1'='1" http://127.0.0.1:8080/   # 403 with CRS loaded
+```
+
+## Install
+
+The agent needs libmodsecurity 3.0.13 or newer, both to build and to run (the
+binary links it dynamically).
+
+```bash
+# macOS
 brew install modsecurity
+
+# Linux: build from source if your distribution ships an older version
+git clone --depth 1 --branch v3.0.13 https://github.com/owasp-modsecurity/ModSecurity
+cd ModSecurity && git submodule update --init
+./build.sh && ./configure && make && sudo make install
 ```
 
-**Ubuntu/Debian:**
-```bash
-apt install libmodsecurity-dev
-```
+### Cargo (recommended for now)
 
-**From source:**
-```bash
-git clone https://github.com/owasp-modsecurity/ModSecurity
-cd ModSecurity
-git submodule init && git submodule update
-./build.sh
-./configure
-make && make install
-```
-
-## Installation
-
-### Using Bundle (Recommended)
-
-```bash
-# Install just this agent
-zentinel bundle install modsec
-
-# Or install all bundled agents
-zentinel bundle install
-```
-
-The bundle command downloads the correct binary for your platform and places it in the standard location. See the [bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/) for details.
-
-### Using Cargo
-
-`zentinel-agent-modsec` is not published on crates.io, so `cargo install zentinel-agent-modsec` does not
-work. Install straight from the repository instead:
+The crate is not on crates.io; install from the repository (needs
+`pkg-config` and the libmodsecurity headers):
 
 ```bash
 cargo install --git https://github.com/zentinelproxy/zentinel-agent-modsec
 ```
 
-This builds and installs the `zentinel-modsec-agent` binary.
+This installs the `zentinel-modsec-agent` binary built from `main`.
 
-### Prebuilt Binaries
+### Bundle
 
-Prebuilt binaries are attached to the
-[releases](https://github.com/zentinelproxy/zentinel-agent-modsec/releases). Asset names and
-the platforms covered vary between releases, so download the asset matching your
-platform from the release page and `install -m 0755` it into your `PATH`.
+```bash
+zentinel bundle install modsec
+```
 
-### From Source
+Installs release 0.3.0 (`linux-x86_64` and `darwin-aarch64` only), which does
+not work with the current proxy (see Known limitations). See the
+[bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/).
+
+### Release binaries
+
+These are release 0.3.0, with the limitation above.
+
+```bash
+VERSION=0.3.0
+PLATFORM=linux-x86_64   # or darwin-aarch64
+curl -fsSL -o zentinel-modsec-agent.tar.gz \
+  "https://github.com/zentinelproxy/zentinel-agent-modsec/releases/download/v${VERSION}/zentinel-modsec-agent-${VERSION}-${PLATFORM}.tar.gz"
+tar -xzf zentinel-modsec-agent.tar.gz
+sudo install -m 0755 zentinel-modsec-agent /usr/local/bin/
+```
+
+### From source
 
 ```bash
 git clone https://github.com/zentinelproxy/zentinel-agent-modsec
@@ -79,315 +195,69 @@ cd zentinel-agent-modsec
 cargo build --release
 ```
 
-## OWASP Core Rule Set (CRS) Setup
-
-The OWASP Core Rule Set provides comprehensive protection against common web attacks. Follow these steps to download, configure, and use the CRS with this agent.
-
-### Step 1: Download CRS
-
-**Option A: Using Git (recommended)**
-```bash
-# Create the modsecurity directory
-sudo mkdir -p /etc/modsecurity
-
-# Clone the CRS repository
-sudo git clone https://github.com/coreruleset/coreruleset /etc/modsecurity/crs
-
-# Or for a specific version (e.g., v4.0.0)
-sudo git clone --branch v4.0.0 https://github.com/coreruleset/coreruleset /etc/modsecurity/crs
-```
-
-**Option B: Download release archive**
-```bash
-# Download latest release
-curl -L https://github.com/coreruleset/coreruleset/archive/refs/tags/v4.0.0.tar.gz -o crs.tar.gz
-sudo mkdir -p /etc/modsecurity
-sudo tar -xzf crs.tar.gz -C /etc/modsecurity
-sudo mv /etc/modsecurity/coreruleset-4.0.0 /etc/modsecurity/crs
-```
-
-### Step 2: Configure CRS
-
-```bash
-# Copy the example configuration
-sudo cp /etc/modsecurity/crs/crs-setup.conf.example /etc/modsecurity/crs/crs-setup.conf
-```
-
-Edit `/etc/modsecurity/crs/crs-setup.conf` to customize settings:
-
-```apache
-# Set paranoia level (1-4, higher = more rules, more false positives)
-SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=1"
-
-# Set detection paranoia level (for logging without blocking)
-SecAction "id:900001,phase:1,pass,t:none,nolog,setvar:tx.detection_paranoia_level=1"
-
-# Anomaly scoring thresholds
-SecAction "id:900110,phase:1,pass,t:none,nolog,setvar:tx.inbound_anomaly_score_threshold=5"
-SecAction "id:900111,phase:1,pass,t:none,nolog,setvar:tx.outbound_anomaly_score_threshold=4"
-```
-
-### Step 3: Directory Structure
-
-After setup, your directory should look like:
-
-```
-/etc/modsecurity/
-└── crs/
-    ├── crs-setup.conf              # Your configuration (copy from .example)
-    ├── crs-setup.conf.example      # Example configuration
-    ├── rules/
-    │   ├── REQUEST-901-INITIALIZATION.conf
-    │   ├── REQUEST-905-COMMON-EXCEPTIONS.conf
-    │   ├── REQUEST-910-IP-REPUTATION.conf
-    │   ├── REQUEST-911-METHOD-ENFORCEMENT.conf
-    │   ├── REQUEST-913-SCANNER-DETECTION.conf
-    │   ├── REQUEST-920-PROTOCOL-ENFORCEMENT.conf
-    │   ├── REQUEST-921-PROTOCOL-ATTACK.conf
-    │   ├── REQUEST-930-APPLICATION-ATTACK-LFI.conf
-    │   ├── REQUEST-931-APPLICATION-ATTACK-RFI.conf
-    │   ├── REQUEST-932-APPLICATION-ATTACK-RCE.conf
-    │   ├── REQUEST-933-APPLICATION-ATTACK-PHP.conf
-    │   ├── REQUEST-934-APPLICATION-ATTACK-GENERIC.conf
-    │   ├── REQUEST-941-APPLICATION-ATTACK-XSS.conf
-    │   ├── REQUEST-942-APPLICATION-ATTACK-SQLI.conf
-    │   ├── REQUEST-943-APPLICATION-ATTACK-SESSION-FIXATION.conf
-    │   ├── REQUEST-944-APPLICATION-ATTACK-JAVA.conf
-    │   ├── REQUEST-949-BLOCKING-EVALUATION.conf
-    │   ├── RESPONSE-950-DATA-LEAKAGES.conf
-    │   ├── RESPONSE-951-DATA-LEAKAGES-SQL.conf
-    │   ├── RESPONSE-952-DATA-LEAKAGES-JAVA.conf
-    │   ├── RESPONSE-953-DATA-LEAKAGES-PHP.conf
-    │   ├── RESPONSE-954-DATA-LEAKAGES-IIS.conf
-    │   ├── RESPONSE-959-BLOCKING-EVALUATION.conf
-    │   └── RESPONSE-980-CORRELATION.conf
-    └── plugins/                     # Optional plugins
-```
-
-### Step 4: Run the Agent with CRS
-
-**Basic usage with full CRS:**
-```bash
-zentinel-modsec-agent \
-  --socket /var/run/zentinel/modsec.sock \
-  --rules /etc/modsecurity/crs/crs-setup.conf \
-  --rules "/etc/modsecurity/crs/rules/*.conf"
-```
-
-**Important:** The order of rules matters. Always load `crs-setup.conf` first, then the rules directory.
-
-**Using environment variables:**
-```bash
-export MODSEC_RULES="/etc/modsecurity/crs/crs-setup.conf,/etc/modsecurity/crs/rules/*.conf"
-zentinel-modsec-agent --socket /var/run/zentinel/modsec.sock
-```
-
-### Step 5: Custom Rules (Optional)
-
-You can add custom rules before or after the CRS rules:
-
-```bash
-# Create custom rules directory
-sudo mkdir -p /etc/modsecurity/custom
-
-# Create a custom rules file
-sudo tee /etc/modsecurity/custom/custom-rules.conf << 'EOF'
-# Block specific User-Agent
-SecRule REQUEST_HEADERS:User-Agent "@contains BadBot" \
-    "id:10001,phase:1,deny,status:403,msg:'Bad bot blocked'"
-
-# Whitelist specific IP
-SecRule REMOTE_ADDR "@ipMatch 192.168.1.100" \
-    "id:10002,phase:1,allow,nolog"
-EOF
-```
-
-**Load order with custom rules:**
-```bash
-zentinel-modsec-agent \
-  --socket /var/run/zentinel/modsec.sock \
-  --rules /etc/modsecurity/crs/crs-setup.conf \
-  --rules "/etc/modsecurity/crs/rules/REQUEST-901-INITIALIZATION.conf" \
-  --rules "/etc/modsecurity/custom/custom-rules.conf" \
-  --rules "/etc/modsecurity/crs/rules/REQUEST-9*.conf" \
-  --rules "/etc/modsecurity/crs/rules/RESPONSE-*.conf"
-```
-
-### Minimal CRS Configuration
-
-For testing or minimal setups, you can load only specific rule categories:
-
-```bash
-# SQLi and XSS protection only
-zentinel-modsec-agent \
-  --socket /var/run/zentinel/modsec.sock \
-  --rules /etc/modsecurity/crs/crs-setup.conf \
-  --rules /etc/modsecurity/crs/rules/REQUEST-901-INITIALIZATION.conf \
-  --rules /etc/modsecurity/crs/rules/REQUEST-941-APPLICATION-ATTACK-XSS.conf \
-  --rules /etc/modsecurity/crs/rules/REQUEST-942-APPLICATION-ATTACK-SQLI.conf \
-  --rules /etc/modsecurity/crs/rules/REQUEST-949-BLOCKING-EVALUATION.conf
-```
-
-## Usage
-
-```bash
-zentinel-modsec-agent \
-  --socket /var/run/zentinel/modsec.sock \
-  --rules /etc/modsecurity/crs/crs-setup.conf \
-  --rules "/etc/modsecurity/crs/rules/*.conf"
-```
-
-### Command Line Options
-
-| Option | Environment Variable | Description | Default |
-|--------|---------------------|-------------|---------|
-| `--socket` | `AGENT_SOCKET` | Unix socket path | `/tmp/zentinel-modsec.sock` |
-| `--rules` | `MODSEC_RULES` | Paths to rule files (comma-separated or multiple flags) | - |
-| `--block-mode` | `MODSEC_BLOCK_MODE` | Block (true) or detect-only (false) | `true` |
-| `--exclude-paths` | `MODSEC_EXCLUDE_PATHS` | Paths to exclude (comma-separated) | - |
-| `--body-inspection` | `MODSEC_BODY_INSPECTION` | Enable request body inspection | `true` |
-| `--max-body-size` | `MODSEC_MAX_BODY_SIZE` | Maximum body size to inspect (bytes) | `1048576` (1MB) |
-| `--response-inspection` | `MODSEC_RESPONSE_INSPECTION` | Enable response body inspection | `false` |
-| `--verbose` | `MODSEC_VERBOSE` | Enable debug logging | `false` |
-
 ## Configuration
 
-### Zentinel Proxy Configuration
+The agent is configured with command-line flags or environment variables. A
+`config { }` block on the proxy's `agent` definition does not reach it.
 
-```kdl
-agents {
-    agent "modsec" {
-        type "custom"
-        transport "unix_socket" {
-            path "/var/run/zentinel/modsec.sock"
-        }
-        events "request_headers" "request_body_chunk" "response_body_chunk"
-        timeout-ms 100
-        failure-mode "open"
-    }
-}
+| Option | Environment | Default | Meaning |
+|---|---|---|---|
+| `--socket` | `AGENT_SOCKET` | `/tmp/zentinel-modsec.sock` | Unix socket to listen on |
+| `--grpc-address` | `AGENT_GRPC_ADDRESS` | unset | Listen on gRPC at this address (e.g. `127.0.0.1:50051`) instead of the socket |
+| `--rules` | `MODSEC_RULES` | none | Rule file or glob; repeat the flag or comma-separate. Loaded in order, so put `crs-setup.conf` first. With no rules nothing is blocked |
+| `--block-mode` | `MODSEC_BLOCK_MODE` | `true` | Block on an intervention; `false` is detect-only |
+| `--exclude-paths` | `MODSEC_EXCLUDE_PATHS` | none | Comma-separated path prefixes that skip inspection |
+| `--body-inspection` | `MODSEC_BODY_INSPECTION` | `true` | Inspect request bodies |
+| `--max-body-size` | `MODSEC_MAX_BODY_SIZE` | `1048576` | Largest body inspected, in bytes; larger bodies pass uninspected |
+| `--response-inspection` | `MODSEC_RESPONSE_INSPECTION` | `false` | Accepted, not implemented |
+| `-v`, `--verbose` | `MODSEC_VERBOSE` | `false` | Debug logging |
 
-routes {
-    route "all" {
-        matches { path-prefix "/" }
-        upstream "backend"
-        agents "modsec"
-    }
-}
-```
+The boolean options are switches: `--block-mode` cannot take a value, so
+`--block-mode=false` is rejected. To turn one off, set the environment
+variable, e.g. `MODSEC_BLOCK_MODE=false`.
 
-### Docker/Kubernetes
+Paranoia level, anomaly thresholds and rule exclusions are set in the rules
+themselves (`crs-setup.conf`, or your own file loaded with `--rules`), as with
+any ModSecurity deployment. Proxy-side agent options are in the
+[agents reference](https://docs.zentinelproxy.io/configuration/agents/).
 
-```yaml
-# Environment variables
-MODSEC_RULES: "/etc/modsecurity/crs/crs-setup.conf,/etc/modsecurity/crs/rules/*.conf"
-MODSEC_BLOCK_MODE: "true"
-MODSEC_EXCLUDE_PATHS: "/health,/metrics"
-```
+## How it works
 
-## Response Headers
+On `request_headers` the agent runs ModSecurity phase 1 (URI, query string,
+headers). If that passes and body inspection is on, it buffers the body and
+runs phase 2 when the last chunk arrives.
 
-On blocked requests:
-- `X-WAF-Blocked: true`
-- `X-WAF-Message: <modsecurity message>`
-
-In detect-only mode, the request continues but includes:
-- `X-WAF-Detected: <message>`
-
-## OWASP CRS Paranoia Levels
-
-The CRS supports paranoia levels 1-4. Higher levels enable more rules but may cause false positives.
-
-### Configuring Paranoia Level
-
-Edit `/etc/modsecurity/crs/crs-setup.conf`:
-
-```apache
-# Blocking paranoia level - requests matching rules at this level are blocked
-SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=1"
-
-# Detection paranoia level - requests are logged but not blocked above blocking level
-SecAction "id:900001,phase:1,pass,t:none,nolog,setvar:tx.detection_paranoia_level=2"
-```
-
-### Paranoia Level Guide
-
-| Level | Description | Use Case |
-|-------|-------------|----------|
-| 1 | Standard protection, minimal false positives | Production - most applications |
-| 2 | Elevated protection, some false positives | Production - security-sensitive apps |
-| 3 | High protection, moderate false positives | Staging/testing, or with tuning |
-| 4 | Maximum protection, high false positives | Security research, highly tuned setups |
-
-### Recommended Approach
-
-1. **Start with detect-only mode** to identify false positives:
-   ```bash
-   zentinel-modsec-agent --block-mode=false --rules ...
-   ```
-
-2. **Begin at Paranoia Level 1** and monitor logs
-
-3. **Gradually increase** if needed, tuning exclusions for false positives
-
-4. **Use detection paranoia** to log higher-level matches without blocking:
-   ```apache
-   # Block at level 1, but log detections at level 2
-   SecAction "id:900000,phase:1,pass,t:none,nolog,setvar:tx.blocking_paranoia_level=1"
-   SecAction "id:900001,phase:1,pass,t:none,nolog,setvar:tx.detection_paranoia_level=2"
-   ```
-
-### Rule Exclusions
-
-To handle false positives, add exclusions in a custom rules file:
-
-```apache
-# Exclude a specific rule for a path
-SecRule REQUEST_URI "@beginsWith /api/upload" \
-    "id:1001,phase:1,pass,nolog,ctl:ruleRemoveById=942100"
-
-# Exclude a rule for a specific parameter
-SecRule ARGS:content "@rx .*" \
-    "id:1002,phase:2,pass,nolog,ctl:ruleRemoveTargetById=941100;ARGS:content"
-```
-
-## Comparison with zentinel-agent-waf
-
-| Feature | zentinel-agent-modsec | zentinel-agent-waf |
-|---------|----------------------|-------------------|
-| Detection Rules | 800+ CRS rules | ~20 regex rules |
-| SecLang Support | ✓ | - |
-| Custom Rules | ✓ | - |
-| Body Inspection | ✓ | ✓ |
-| Dependencies | libmodsecurity (C) | Pure Rust |
-| Binary Size | ~50MB | ~5MB |
-| Memory Usage | Higher | Lower |
-| Installation | Requires libmodsecurity | `cargo install` |
-
-**When to use this agent:**
-- You need full OWASP CRS compatibility
-- You have existing ModSecurity/SecLang rules
-- You require comprehensive protection with 800+ detection rules
-
-**When to use [zentinel-agent-waf](https://github.com/zentinelproxy/zentinel-agent-waf):**
-- You want simple, zero-dependency deployment
-- You need low latency and minimal resource usage
-- Basic attack detection is sufficient
+| Outcome | What the agent returns |
+|---|---|
+| Intervention, block mode | The rule's status, body `Forbidden`, response headers `X-WAF-Blocked: true` and `X-WAF-Message: Blocked by ModSecurity` |
+| Intervention, detect-only | Allow, with `X-WAF-Detected` added to the request sent upstream |
+| Engine error | Allow, logged as a warning |
 
 ## Development
 
 ```bash
-# Run with debug logging
-RUST_LOG=debug cargo run -- --socket /tmp/test.sock --rules test-rules.conf
-
-# Run tests
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
 cargo test
-
-# Check formatting and lints
-cargo fmt --check
-cargo clippy
 ```
+
+Building needs Rust 1.94.1+, libmodsecurity 3.0.13+ and `protoc`.
+
+## Related
+
+- [Registry page](https://registry.zentinelproxy.io/modsec/)
+- [zentinel-agent-zentinelsec](https://github.com/zentinelproxy/zentinel-agent-zentinelsec): the same rules on the pure-Rust engine
+- [zentinel-modsec](https://github.com/zentinelproxy/zentinel-modsec): that engine
+- [zentinel-agent-waf](https://github.com/zentinelproxy/zentinel-agent-waf): Zentinel's own rule set, no SecLang
+- [Agent protocol v2](https://docs.zentinelproxy.io/agents/v2/)
+- [Zentinel](https://github.com/zentinelproxy/zentinel)
 
 ## License
 
-Apache-2.0
+Apache-2.0, see [`LICENSE`](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Part of <a href="https://zentinelproxy.io">Zentinel</a>, the security-first reverse proxy. The shisa guards the gate.</sub>
+</p>
