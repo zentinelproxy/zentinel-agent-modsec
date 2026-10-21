@@ -15,7 +15,7 @@ use zentinel_agent_protocol::v2::{GrpcAgentServerV2, UdsAgentServerV2};
 
 /// Command line arguments
 #[derive(Parser, Debug)]
-#[command(name = "zentinel-modsec-agent")]
+#[command(name = "zentinel-modsec-agent", version)]
 #[command(about = "ModSecurity WAF agent for Zentinel reverse proxy - full OWASP CRS support")]
 struct Args {
     /// Path to Unix socket (mutually exclusive with --grpc-address)

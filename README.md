@@ -39,20 +39,19 @@ behavior, zentinelsec for a single static binary.
 
 > **Known limitations** (checked against stock CRS on 2026-10-21):
 >
-> - Phase 2 rules run only when a request has a body. Most CRS detection, and
->   the blocking evaluation in rule 949110, is phase 2, so an attack in the
->   query string of a `GET` is detected by nothing and passes. `POST` bodies are
->   inspected and blocked.
-> - Rule files are loaded as text, so data files that CRS references by
->   relative path (`@pmFromFile scanners-user-agents.data`) are looked up in the
->   working directory. Start the agent from the CRS `rules/` directory, or it
->   exits at startup with `Failed to open file: 'scanners-user-agents.data'`.
+> - Up to 0.3.0, phase 2 rules ran only when a request had a body, so under
+>   CRS (whose detection and 949110 blocking are phase 2) an attack in the
+>   query string of a `GET` passed; rule files were loaded as text, so CRS
+>   data files (`@pmFromFile scanners-user-agents.data`) were not found unless
+>   the agent ran from the CRS `rules/` directory; and JSON bodies were never
+>   parsed. All three are fixed in 0.4.0.
 > - A body larger than `--max-body-size` is passed on uninspected.
 > - `--response-inspection` is accepted but response bodies are not inspected.
-> - The released binary (0.3.0, which `zentinel bundle install modsec` also
->   installs) does not speak the current agent protocol: the proxy's handshake
->   fails with `Invalid message format` and every request gets a 503. Build
->   from `main` until a new release ships.
+> - Release 0.3.0 (which `zentinel bundle install modsec` still installs) was
+>   tagged before the UDS transport moved to the v2 protocol: the proxy's
+>   handshake fails with `Invalid message format` and every request gets a
+>   503. 0.4.0 fixes this; until it is released and the bundle points at it,
+>   build from `main`.
 
 ## Quick start
 
@@ -65,12 +64,11 @@ sudo cp /etc/modsecurity/crs/crs-setup.conf.example /etc/modsecurity/crs/crs-set
 # 2. The agent, built from main (see Known limitations)
 cargo install --git https://github.com/zentinelproxy/zentinel-agent-modsec
 
-# 3. Run it from the rules directory (see Known limitations)
-cd /etc/modsecurity/crs/rules
+# 3. Run it with the CRS setup file and every rule file
 zentinel-modsec-agent \
   --socket /var/run/zentinel/modsec.sock \
-  --rules ../crs-setup.conf \
-  --rules "*.conf"
+  --rules /etc/modsecurity/crs/crs-setup.conf \
+  --rules "/etc/modsecurity/crs/rules/*.conf"
 ```
 
 Then point Zentinel at the socket. Request bodies reach agents only when the
@@ -170,17 +168,23 @@ This installs the `zentinel-modsec-agent` binary built from `main`.
 zentinel bundle install modsec
 ```
 
-Installs release 0.3.0 (`linux-x86_64` and `darwin-aarch64` only), which does
-not work with the current proxy (see Known limitations). See the
+Installs the release pinned in the proxy's bundle lock. Until that is 0.4.0
+it is 0.3.0 (`linux-x86_64` and `darwin-aarch64` only), which does not work
+with the current proxy (see Known limitations). See the
 [bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/).
 
 ### Release binaries
 
-These are release 0.3.0, with the limitation above.
+From 0.4.0, each release ships `linux-x86_64`, `linux-aarch64` and
+`darwin-aarch64`, each with a `.sha256`, and every asset has passed
+`scripts/smoke-test.sh` (stock CRS behind a real Zentinel) before it was
+published. The binary links libmodsecurity 3 dynamically, so the host needs it
+(`apt install libmodsecurity3`, `brew install modsecurity`). 0.3.0 has the
+limitation above.
 
 ```bash
-VERSION=0.3.0
-PLATFORM=linux-x86_64   # or darwin-aarch64
+VERSION=0.4.0
+PLATFORM=linux-x86_64   # or linux-aarch64, darwin-aarch64
 curl -fsSL -o zentinel-modsec-agent.tar.gz \
   "https://github.com/zentinelproxy/zentinel-agent-modsec/releases/download/v${VERSION}/zentinel-modsec-agent-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf zentinel-modsec-agent.tar.gz

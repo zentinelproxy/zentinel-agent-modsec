@@ -1,189 +1,221 @@
 name: Release
 
+# A release is one tag push:
+#
+#   git tag -a v0.4.0 -m "v0.4.0" && git push origin v0.4.0
+#
+# The tag must equal `version` in Cargo.toml; the workflow refuses otherwise.
+# Every platform is built from the tagged commit with the committed Cargo.lock,
+# then run with stock OWASP CRS behind a real Zentinel (scripts/smoke-test.sh). Nothing is published
+# unless every platform passes. The asset names are the ones `zentinel bundle
+# install` downloads:
+#
+#   <binary>-<version>-<os>-<arch>.tar.gz  (+ .sha256)
+#
+# The binary links libmodsecurity 3 dynamically; hosts need it installed
+# (e.g. `apt install libmodsecurity3`, `brew install modsecurity`).
+#
+# Running the workflow by hand (workflow_dispatch) builds and smoke-tests
+# without publishing anything.
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-    # Trigger manual builds
-    inputs:
-      version:
-        description: 'Version to release (e.g., 0.2.0)'
-        required: true
-        type: string
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: zentinel-modsec-agent
+  # The Zentinel release the smoke test runs the agent behind.
+  ZENTINEL_RELEASE: "26.10_7"
+  # Stock OWASP CRS for the smoke test: the commit zentinel-modsec's CI pins.
+  CRS_COMMIT: 30cb436b261a9f5ec32a5a0677e17f3cfa1a8739
+  LIBMODSECURITY_VERSION: v3.0.14
 
 jobs:
+  version:
+    name: Check tag against Cargo.toml
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: v
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "Cargo.toml version: $version"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}. Bump Cargo.toml in a commit first and tag that commit."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   build:
-    name: Build ${{ matrix.target }}
+    name: Build and smoke-test ${{ matrix.artifact }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             artifact: linux-x86_64
-          # NOTE: aarch64-linux cross-compilation disabled - requires libmodsecurity cross-compile
+            zentinel: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            artifact: linux-aarch64
+            zentinel: linux-arm64
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
             artifact: darwin-aarch64
-
+            zentinel: darwin-arm64
+          # darwin-x86_64 is not built: macOS Intel runners are scarce and the
+          # bundle does not advertise that platform.
     steps:
-      - name: Checkout agent
-        uses: actions/checkout@v4
-        with:
-          path: agent
+      - uses: actions/checkout@v6
 
-      - name: Checkout SDK
-        uses: actions/checkout@v4
-        with:
-          repository: zentinelproxy/zentinel-agent-rust-sdk
-          path: zentinel-agent-rust-sdk
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install protoc (Linux)
+      - name: Install protoc and libmodsecurity build deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
+            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
 
-      - name: Install protoc (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
-
-      - name: Install libmodsecurity (Linux)
+      - name: Cache libmodsecurity (Linux)
         if: runner.os == 'Linux'
-        run: |
-          # Install build dependencies for modsecurity from source
-          sudo apt-get install -y \
-            g++ apt-utils autoconf automake build-essential git libcurl4-openssl-dev \
-            libgeoip-dev liblmdb-dev libpcre3-dev libpcre2-dev libtool libxml2-dev libyajl-dev \
-            pkg-config zlib1g-dev
-          # Build ModSecurity v3 from source
-          cd /tmp
-          git clone --depth 1 --branch v3.0.13 https://github.com/owasp-modsecurity/ModSecurity.git
-          cd ModSecurity
-          git submodule init
-          git submodule update
-          ./build.sh
-          ./configure --prefix=/usr/local
-          make -j$(nproc)
-          sudo make install
-          sudo ldconfig
-          # Set PKG_CONFIG_PATH for subsequent steps
-          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/local/lib" >> $GITHUB_ENV
-          # Verify
-          PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --cflags --libs modsecurity
-
-      - name: Install libmodsecurity (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install modsecurity
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+        id: cache-modsec
+        uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            agent/target/
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('agent/**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
+            /usr/local/lib/libmodsecurity*
+            /usr/local/lib/pkgconfig/modsecurity.pc
+            /usr/local/include/modsecurity
+          key: ${{ runner.os }}-${{ runner.arch }}-libmodsecurity-${{ env.LIBMODSECURITY_VERSION }}
 
-      - name: Build release binary
-        working-directory: agent
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Strip binary (Linux native)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: strip agent/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}
-
-      - name: Strip binary (macOS)
-        if: contains(matrix.target, 'darwin')
-        run: strip agent/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}
-
-      - name: Determine version
-        id: version
+      # The agent links libmodsecurity dynamically; built here the same way as
+      # in ci.yml, so linux-x86_64 and linux-aarch64 (native arm runner) match.
+      - name: Build libmodsecurity (Linux)
+        if: runner.os == 'Linux' && steps.cache-modsec.outputs.cache-hit != 'true'
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-          fi
+          git clone --depth 1 --branch "$LIBMODSECURITY_VERSION" https://github.com/owasp-modsecurity/ModSecurity.git /tmp/modsecurity
+          cd /tmp/modsecurity
+          git submodule init && git submodule update
+          ./build.sh
+          ./configure --prefix=/usr/local --without-lmdb
+          make -j"$(nproc)"
+          sudo make install
 
-      - name: Package binary
+      - name: Linker setup (Linux)
+        if: runner.os == 'Linux'
         run: |
+          sudo ldconfig
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/local/lib" >> "$GITHUB_ENV"
+
+      - name: Install protoc and libmodsecurity (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf modsecurity
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip
+        run: strip target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}
+
+      - name: Check the binary reports the release version
+        run: |
+          set -euo pipefail
+          out=$(target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} --version)
+          echo "$out"
+          [ "$out" = "${{ env.BINARY_NAME }} ${{ needs.version.outputs.version }}" ]
+
+      - name: Download Zentinel ${{ env.ZENTINEL_RELEASE }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset="zentinel-${ZENTINEL_RELEASE}-${{ matrix.zentinel }}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/zentinel"
+          cd "$RUNNER_TEMP/zentinel"
+          gh release download "$ZENTINEL_RELEASE" --repo zentinelproxy/zentinel \
+            --pattern "$asset" --pattern "$asset.sha256"
+          shasum -a 256 -c "$asset.sha256"
+          tar xzf "$asset"
+          ./zentinel --version
+
+      - name: Fetch OWASP CRS
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/crs"
+          git -C "$RUNNER_TEMP/crs" fetch -q --depth 1 https://github.com/coreruleset/coreruleset.git "$CRS_COMMIT"
+          git -C "$RUNNER_TEMP/crs" checkout -q FETCH_HEAD
+
+      - name: Smoke test behind Zentinel (stock CRS)
+        run: |
+          CRS_DIR="$RUNNER_TEMP/crs" scripts/smoke-test.sh \
+            target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} \
+            "$RUNNER_TEMP/zentinel/zentinel"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="${BINARY_NAME}-${{ needs.version.outputs.version }}-${{ matrix.artifact }}.tar.gz"
           mkdir -p dist
-          cp agent/target/${{ matrix.target }}/release/${{ env.BINARY_NAME }} dist/
+          cp target/${{ matrix.target }}/release/${BINARY_NAME} dist/
           cd dist
-          tar -czvf ${{ env.BINARY_NAME }}-${{ steps.version.outputs.version }}-${{ matrix.artifact }}.tar.gz ${{ env.BINARY_NAME }}
+          tar -czf "$name" "$BINARY_NAME"
+          shasum -a 256 "$name" > "$name.sha256"
+          rm "$BINARY_NAME"
+          cat "$name.sha256"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*.tar.gz
-          retention-days: 1
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
 
   release:
-    name: Create Release
-    needs: build
+    name: Publish GitHub release
+    needs: [version, build]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
-            echo "tag=v${{ inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
-      - name: List artifacts
-        run: find artifacts -type f
-
-      - name: Collect release files
+      - name: Check every bundle asset is present
         run: |
-          mkdir -p release
-          find artifacts -name '*.tar.gz' -exec mv {} release/ \;
-          ls -la release/
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          for p in linux-x86_64 linux-aarch64 darwin-aarch64; do
+            test -f "artifacts/${BINARY_NAME}-${v}-${p}.tar.gz"
+            test -f "artifacts/${BINARY_NAME}-${v}-${p}.tar.gz.sha256"
+          done
+          ls -l artifacts
 
-      - name: Delete existing release if exists
-        run: gh release delete "${{ steps.version.outputs.tag }}" --yes || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      # Fails if a release for this tag already exists: a published release is
+      # never replaced in place.
       - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: v${{ steps.version.outputs.version }}
-          files: release/*
-          fail_on_unmatched_files: true
-          generate_release_notes: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

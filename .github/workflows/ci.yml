@@ -14,6 +14,9 @@ env:
   RUST_BACKTRACE: 1
   PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
   LD_LIBRARY_PATH: /usr/local/lib
+  # Stock OWASP CRS used by the tests and the smoke test (the commit
+  # zentinel-modsec's CI pins).
+  CRS_COMMIT: 30cb436b261a9f5ec32a5a0677e17f3cfa1a8739
 
 jobs:
   fmt:
@@ -126,4 +129,80 @@ jobs:
           sudo make install
       - name: Update linker cache
         run: sudo ldconfig
+      # tests/crs_integration.rs fails on CI without this checkout instead of
+      # skipping, so the CRS tests cannot silently stop running again.
+      - name: Fetch OWASP CRS
+        run: |
+          set -euo pipefail
+          git init -q testdata/crs-src
+          git -C testdata/crs-src fetch -q --depth 1 https://github.com/coreruleset/coreruleset.git "$CRS_COMMIT"
+          git -C testdata/crs-src checkout -q FETCH_HEAD
+          mkdir -p testdata/crs
+          cp -R testdata/crs-src/rules testdata/crs/
+          cp testdata/crs-src/crs-setup.conf.example testdata/crs/crs-setup.conf
       - run: cargo test --workspace
+
+  # Runs the release binary with stock CRS behind a real Zentinel and checks
+  # the v2 handshake, an allowed request and blocked attacks. Same script as
+  # the release workflow, so a change that would break a release fails here.
+  smoke:
+    name: Smoke test behind Zentinel
+    runs-on: ubuntu-latest
+    env:
+      ZENTINEL_RELEASE: "26.10_7"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-smoke-
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
+            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
+      - name: Cache libmodsecurity
+        id: cache-modsec
+        uses: actions/cache@v5
+        with:
+          path: |
+            /usr/local/lib/libmodsecurity*
+            /usr/local/lib/pkgconfig/modsecurity.pc
+            /usr/local/include/modsecurity
+          key: ${{ runner.os }}-libmodsecurity-3.0.14-v2
+      - name: Build libmodsecurity from source
+        if: steps.cache-modsec.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v3.0.14 https://github.com/owasp-modsecurity/ModSecurity.git /tmp/modsecurity
+          cd /tmp/modsecurity
+          git submodule init && git submodule update
+          ./build.sh
+          ./configure --prefix=/usr/local --without-lmdb
+          make -j$(nproc)
+          sudo make install
+      - name: Update linker cache
+        run: sudo ldconfig
+      - run: cargo build --release --locked
+      - name: Fetch OWASP CRS
+        run: |
+          set -euo pipefail
+          git init -q "$RUNNER_TEMP/crs"
+          git -C "$RUNNER_TEMP/crs" fetch -q --depth 1 https://github.com/coreruleset/coreruleset.git "$CRS_COMMIT"
+          git -C "$RUNNER_TEMP/crs" checkout -q FETCH_HEAD
+      - name: Download Zentinel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset="zentinel-${ZENTINEL_RELEASE}-linux-amd64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/zentinel" && cd "$RUNNER_TEMP/zentinel"
+          gh release download "$ZENTINEL_RELEASE" --repo zentinelproxy/zentinel \
+            --pattern "$asset" --pattern "$asset.sha256"
+          shasum -a 256 -c "$asset.sha256"
+          tar xzf "$asset"
+      - run: CRS_DIR="$RUNNER_TEMP/crs" scripts/smoke-test.sh target/release/zentinel-modsec-agent "$RUNNER_TEMP/zentinel/zentinel"
