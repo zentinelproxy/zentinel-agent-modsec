@@ -23,7 +23,7 @@ use base64::Engine;
 use modsecurity::{ModSecurity, Rules};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -315,7 +315,9 @@ impl ModSecEngine {
     }
 
     fn build(config: ModSecConfig, strict: bool) -> Result<Self> {
-        let modsec = ModSecurity::default();
+        // Log callbacks must be enabled on the instance for the per-transaction
+        // callback (rule id and msg of every hit) to be invoked.
+        let modsec = ModSecurity::builder().with_log_callbacks().build();
         let mut rules = Rules::new();
 
         // Enable the rule engine (required for blocking to work)
@@ -412,6 +414,80 @@ struct PendingTransaction {
     uri: String,
     headers: HashMap<String, Vec<String>>,
     client_ip: String,
+}
+
+/// A rule that fired, as reported by libmodsecurity's log callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuleHit {
+    id: String,
+    message: String,
+}
+
+/// Outcome of an intervention: HTTP status plus the rules behind it.
+#[derive(Debug, Clone)]
+struct Verdict {
+    status: u16,
+    /// msg of the rule that triggered the intervention
+    message: String,
+    /// id of the rule that triggered the intervention
+    trigger: Option<String>,
+    /// every rule that logged during the transaction (deduplicated, in order)
+    hits: Vec<RuleHit>,
+}
+
+impl Verdict {
+    fn rule_ids(&self) -> Vec<String> {
+        self.hits.iter().map(|h| h.id.clone()).collect()
+    }
+}
+
+/// Message reported when libmodsecurity gives no `msg` for the intervention.
+const DEFAULT_MESSAGE: &str = "Blocked by ModSecurity";
+
+/// Extract `value` from a `[key "value"]` field of a libmodsecurity log line.
+fn bracket_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("[{key} \"");
+    let start = line.find(&needle)? + needle.len();
+    let end = line[start..].find("\"]")?;
+    Some(&line[start..start + end])
+}
+
+/// Parse the hits out of the lines captured by the log callback.
+fn hits_from_logs(lines: &[String]) -> Vec<RuleHit> {
+    let mut hits: Vec<RuleHit> = Vec::new();
+    for line in lines {
+        let Some(id) = bracket_field(line, "id") else {
+            continue;
+        };
+        if hits.iter().any(|h| h.id == id) {
+            continue;
+        }
+        hits.push(RuleHit {
+            id: id.to_string(),
+            message: bracket_field(line, "msg").unwrap_or_default().to_string(),
+        });
+    }
+    hits
+}
+
+/// Make a rule message safe for an audit string and a log line.
+fn sanitize_message(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .take(200)
+        .collect();
+    if cleaned.is_empty() {
+        DEFAULT_MESSAGE.to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// ModSecurity agent
@@ -525,14 +601,23 @@ impl ModSecAgent {
         headers: &HashMap<String, Vec<String>>,
         body: Option<&[u8]>,
         _client_ip: &str,
-    ) -> Result<Option<(u16, String)>> {
+    ) -> Result<Option<Verdict>> {
         let engine = self.engine.read().await;
+
+        // Every rule that logs during this transaction ends up here.
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&logs);
 
         // Build transaction
         let mut tx = engine
             .modsec
             .transaction_builder()
             .with_rules(&engine.rules)
+            .with_logging(move |msg| {
+                if let (Some(msg), Ok(mut lines)) = (msg, sink.lock()) {
+                    lines.push(msg.to_string());
+                }
+            })
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create transaction: {}", e))?;
 
@@ -553,16 +638,8 @@ impl ModSecAgent {
             .map_err(|e| anyhow::anyhow!("process_request_headers failed: {}", e))?;
 
         // Check for intervention after headers
-        if let Some(intervention) = tx.intervention() {
-            let status = intervention.status() as u16;
-            if status != 0 && status != 200 {
-                debug!(
-                    correlation_id = correlation_id,
-                    status = status,
-                    "ModSecurity intervention (headers)"
-                );
-                return Ok(Some((status, "Blocked by ModSecurity".to_string())));
-            }
+        if let Some(verdict) = Self::verdict(&mut tx, &logs, correlation_id) {
+            return Ok(Some(verdict));
         }
 
         // Phase 2. `None` means a body is still coming and will be processed
@@ -580,20 +657,133 @@ impl ModSecAgent {
                 .map_err(|e| anyhow::anyhow!("process_request_body failed: {}", e))?;
 
             // Check for intervention after body
-            if let Some(intervention) = tx.intervention() {
-                let status = intervention.status() as u16;
-                if status != 0 && status != 200 {
-                    debug!(
-                        correlation_id = correlation_id,
-                        status = status,
-                        "ModSecurity intervention (body)"
-                    );
-                    return Ok(Some((status, "Blocked by ModSecurity".to_string())));
-                }
+            if let Some(verdict) = Self::verdict(&mut tx, &logs, correlation_id) {
+                return Ok(Some(verdict));
             }
         }
 
+        let seen = logs.lock().map(|l| hits_from_logs(&l)).unwrap_or_default();
+        if !seen.is_empty() {
+            debug!(
+                correlation_id,
+                rules = %seen.iter().map(|h| h.id.as_str()).collect::<Vec<_>>().join(","),
+                "ModSecurity rules matched, no intervention"
+            );
+        }
         Ok(None)
+    }
+
+    /// Build a verdict from the transaction's intervention, if there is one.
+    ///
+    /// The rule that triggered the intervention is read from the intervention's
+    /// own log line; the callback lines supply every other rule that logged.
+    fn verdict(
+        tx: &mut modsecurity::Transaction<'_>,
+        logs: &Arc<Mutex<Vec<String>>>,
+        correlation_id: &str,
+    ) -> Option<Verdict> {
+        let intervention = tx.intervention()?;
+        let status = intervention.status() as u16;
+        if status == 0 || status == 200 {
+            return None;
+        }
+        let iv_log = intervention.log().unwrap_or_default().to_string();
+        let lines = logs.lock().map(|l| l.clone()).unwrap_or_default();
+        let mut hits = hits_from_logs(&lines);
+        // Without an `id` in the intervention's log line, the last rule that
+        // logged is the best guess; it may be one that did not disrupt.
+        let trigger = bracket_field(&iv_log, "id")
+            .map(str::to_string)
+            .or_else(|| hits.last().map(|h| h.id.clone()));
+        let message = bracket_field(&iv_log, "msg")
+            .map(str::to_string)
+            .or_else(|| {
+                trigger
+                    .as_ref()
+                    .and_then(|t| hits.iter().find(|h| &h.id == t))
+                    .map(|h| h.message.clone())
+            })
+            .filter(|m| !m.is_empty())
+            .map(|m| sanitize_message(&m))
+            .unwrap_or_else(|| DEFAULT_MESSAGE.to_string());
+        // The trigger may only appear in the intervention log, not the callback.
+        if let Some(t) = &trigger {
+            if !hits.iter().any(|h| &h.id == t) {
+                hits.push(RuleHit {
+                    id: t.clone(),
+                    message: message.clone(),
+                });
+            }
+        }
+        debug!(
+            correlation_id,
+            status,
+            trigger = trigger.as_deref().unwrap_or(""),
+            "ModSecurity intervention"
+        );
+        Some(Verdict {
+            status,
+            message,
+            trigger,
+            hits,
+        })
+    }
+
+    /// Turn a verdict into a response according to block / detect-only mode.
+    ///
+    /// The rule id and text go to the log and the audit metadata only; the
+    /// client sees a constant message and no rule id.
+    async fn respond(&self, verdict: Verdict, stage: &str, correlation_id: &str) -> AgentResponse {
+        let block_mode = self.engine.read().await.config.block_mode;
+        let rule_ids = verdict.rule_ids();
+        let mut tags = vec!["modsec".to_string()];
+        tags.push(if block_mode { "blocked" } else { "detected" }.to_string());
+        if stage == "body" {
+            tags.push("body".to_string());
+        }
+        let audit = AuditMetadata {
+            tags,
+            rule_ids: rule_ids.clone(),
+            reason_codes: vec![verdict.message.clone()],
+            ..Default::default()
+        };
+
+        if block_mode {
+            info!(
+                correlation_id,
+                status = verdict.status,
+                stage,
+                trigger = verdict.trigger.as_deref().unwrap_or(""),
+                rules = %rule_ids.join(","),
+                rule_msg = %verdict.message,
+                "Request blocked by ModSecurity"
+            );
+            let resp = AgentResponse::block(verdict.status, Some("Forbidden".to_string()))
+                .add_response_header(HeaderOp::Set {
+                    name: "X-WAF-Blocked".to_string(),
+                    value: "true".to_string(),
+                })
+                .add_response_header(HeaderOp::Set {
+                    name: "X-WAF-Message".to_string(),
+                    value: DEFAULT_MESSAGE.to_string(),
+                });
+            resp.with_audit(audit)
+        } else {
+            info!(
+                correlation_id,
+                stage,
+                trigger = verdict.trigger.as_deref().unwrap_or(""),
+                rules = %rule_ids.join(","),
+                rule_msg = %verdict.message,
+                "ModSecurity detection (detect-only mode)"
+            );
+            AgentResponse::default_allow()
+                .add_request_header(HeaderOp::Set {
+                    name: "X-WAF-Detected".to_string(),
+                    value: DEFAULT_MESSAGE.to_string(),
+                })
+                .with_audit(audit)
+        }
     }
 }
 
@@ -706,45 +896,7 @@ impl AgentHandlerV2 for ModSecAgent {
             )
             .await
         {
-            Ok(Some((status, message))) => {
-                let engine = self.engine.read().await;
-                if engine.config.block_mode {
-                    info!(
-                        correlation_id = correlation_id,
-                        status = status,
-                        "Request blocked by ModSecurity"
-                    );
-                    AgentResponse::block(status, Some("Forbidden".to_string()))
-                        .add_response_header(HeaderOp::Set {
-                            name: "X-WAF-Blocked".to_string(),
-                            value: "true".to_string(),
-                        })
-                        .add_response_header(HeaderOp::Set {
-                            name: "X-WAF-Message".to_string(),
-                            value: message.clone(),
-                        })
-                        .with_audit(AuditMetadata {
-                            tags: vec!["modsec".to_string(), "blocked".to_string()],
-                            reason_codes: vec![message],
-                            ..Default::default()
-                        })
-                } else {
-                    info!(
-                        correlation_id = correlation_id,
-                        "ModSecurity detection (detect-only mode)"
-                    );
-                    AgentResponse::default_allow()
-                        .add_request_header(HeaderOp::Set {
-                            name: "X-WAF-Detected".to_string(),
-                            value: message.clone(),
-                        })
-                        .with_audit(AuditMetadata {
-                            tags: vec!["modsec".to_string(), "detected".to_string()],
-                            reason_codes: vec![message],
-                            ..Default::default()
-                        })
-                }
-            }
+            Ok(Some(verdict)) => self.respond(verdict, "headers", correlation_id).await,
             Ok(None) => {
                 // Headers passed - if a body is coming, store for body processing
                 if defer_body {
@@ -848,52 +1000,8 @@ impl AgentHandlerV2 for ModSecAgent {
                     )
                     .await
                 {
-                    Ok(Some((status, message))) => {
-                        let engine = self.engine.read().await;
-                        if engine.config.block_mode {
-                            info!(
-                                correlation_id = correlation_id,
-                                status = status,
-                                "Request blocked by ModSecurity (body inspection)"
-                            );
-                            return AgentResponse::block(status, Some("Forbidden".to_string()))
-                                .add_response_header(HeaderOp::Set {
-                                    name: "X-WAF-Blocked".to_string(),
-                                    value: "true".to_string(),
-                                })
-                                .add_response_header(HeaderOp::Set {
-                                    name: "X-WAF-Message".to_string(),
-                                    value: message.clone(),
-                                })
-                                .with_audit(AuditMetadata {
-                                    tags: vec![
-                                        "modsec".to_string(),
-                                        "blocked".to_string(),
-                                        "body".to_string(),
-                                    ],
-                                    reason_codes: vec![message],
-                                    ..Default::default()
-                                });
-                        } else {
-                            info!(
-                                correlation_id = correlation_id,
-                                "ModSecurity detection in body (detect-only mode)"
-                            );
-                            return AgentResponse::default_allow()
-                                .add_request_header(HeaderOp::Set {
-                                    name: "X-WAF-Detected".to_string(),
-                                    value: message.clone(),
-                                })
-                                .with_audit(AuditMetadata {
-                                    tags: vec![
-                                        "modsec".to_string(),
-                                        "detected".to_string(),
-                                        "body".to_string(),
-                                    ],
-                                    reason_codes: vec![message],
-                                    ..Default::default()
-                                });
-                        }
+                    Ok(Some(verdict)) => {
+                        return self.respond(verdict, "body", correlation_id).await;
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -926,6 +1034,42 @@ mod tests {
         assert!(config.body_inspection_enabled);
         assert!(!config.response_inspection_enabled);
         assert_eq!(config.max_body_size, 1048576);
+    }
+
+    #[test]
+    fn test_bracket_field() {
+        let line = r#"ModSecurity: Access denied with code 403 (phase 2). [file "/r.conf"] [line "1"] [id "949110"] [msg "Inbound Anomaly Score Exceeded (Total Score: 5)"] [tag "x"]"#;
+        assert_eq!(bracket_field(line, "id"), Some("949110"));
+        assert_eq!(
+            bracket_field(line, "msg"),
+            Some("Inbound Anomaly Score Exceeded (Total Score: 5)")
+        );
+        assert_eq!(bracket_field(line, "severity"), None);
+        assert_eq!(bracket_field("[id \"1", "id"), None);
+    }
+
+    #[test]
+    fn test_hits_from_logs_keeps_order_and_drops_duplicates() {
+        let lines = vec![
+            r#"[id "920350"] [msg "Host header is a numeric IP address"]"#.to_string(),
+            "no fields on this line".to_string(),
+            r#"[id "942100"] [msg "SQL Injection Attack"]"#.to_string(),
+            r#"[id "920350"] [msg "again"]"#.to_string(),
+            r#"[id "949110"]"#.to_string(),
+        ];
+        let hits = hits_from_logs(&lines);
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, ["920350", "942100", "949110"]);
+        assert_eq!(hits[0].message, "Host header is a numeric IP address");
+        assert_eq!(hits[2].message, "");
+    }
+
+    #[test]
+    fn test_sanitize_message() {
+        assert_eq!(sanitize_message("plain text"), "plain text");
+        assert_eq!(sanitize_message("a\r\nb\u{3042}"), "a??b?");
+        assert_eq!(sanitize_message(""), DEFAULT_MESSAGE);
+        assert_eq!(sanitize_message(&"x".repeat(500)).len(), 200);
     }
 
     #[test]
@@ -1028,7 +1172,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(blocked.map(|(status, _)| status), Some(403));
+        let blocked = blocked.expect("phase 2 must block the query string");
+        assert_eq!(blocked.status, 403);
+        assert_eq!(blocked.trigger.as_deref(), Some("10"));
 
         let clean = agent
             .process_request(

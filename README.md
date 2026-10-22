@@ -283,6 +283,24 @@ runs phase 2 when the last chunk arrives.
 | Intervention, detect-only | Allow, with `X-WAF-Detected` added to the request sent upstream |
 | Engine error | Allow, logged as a warning |
 
+## Which Rule Blocked a Request
+
+When a request is blocked (or detected, in detect-only mode) the agent logs one
+`Request blocked by ModSecurity` / `ModSecurity detection` line at `info`
+level with the triggering rule id (`trigger`), the ids of every rule that
+logged during the transaction (`rules`, comma separated) and the `msg` of the
+triggering rule (`rule_msg`). The same data is attached to the response as audit metadata:
+`rule_ids` and `reason_codes`.
+
+```json
+{"level":"INFO","fields":{"message":"Request blocked by ModSecurity","status":403,"stage":"body","trigger":"949110","rules":"920350,942100,949110","rule_msg":"Inbound Anomaly Score Exceeded (Total Score: 8)"}}
+```
+
+Rules that matched but did not cause a block are listed at `debug` level
+(`--verbose`).
+
+Rule ids and rule text are never sent to the client; they are in the log and the audit metadata only.
+
 ## Development
 
 ```bash
