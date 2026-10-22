@@ -37,7 +37,7 @@ use zentinel_agent_protocol::{
 };
 
 /// ModSecurity configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModSecConfig {
     /// Paths to ModSecurity rule files
     pub rules_paths: Vec<String>,
@@ -66,56 +66,221 @@ impl Default for ModSecConfig {
     }
 }
 
-/// JSON-serializable configuration for ModSecurity agent
+impl ModSecConfig {
+    /// Names (as written in a `config { }` block) of the settings that differ
+    /// between `self` and `other`. Used to log what a configure changed
+    /// without logging the values.
+    pub fn changed_keys(&self, other: &ModSecConfig) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if self.rules_paths != other.rules_paths {
+            keys.push("rules-paths");
+        }
+        if self.block_mode != other.block_mode {
+            keys.push("block-mode");
+        }
+        if self.exclude_paths != other.exclude_paths {
+            keys.push("exclude-paths");
+        }
+        if self.body_inspection_enabled != other.body_inspection_enabled {
+            keys.push("body-inspection-enabled");
+        }
+        if self.max_body_size != other.max_body_size {
+            keys.push("max-body-size");
+        }
+        if self.response_inspection_enabled != other.response_inspection_enabled {
+            keys.push("response-inspection-enabled");
+        }
+        keys
+    }
+
+    /// Whether going from `self` to `other` needs the rule set rebuilt.
+    /// Only the rule files and body inspection (which adds engine
+    /// directives) shape the compiled rules; the other settings are read per
+    /// request and can change in place.
+    fn needs_rebuild(&self, other: &ModSecConfig) -> bool {
+        self.rules_paths != other.rules_paths
+            || self.body_inspection_enabled != other.body_inspection_enabled
+    }
+}
+
+/// The agent's `config { }` block, as the proxy sends it in Configure.
 ///
-/// Used for parsing configuration from the proxy's agent config.
-/// Field names use kebab-case to match YAML/JSON config conventions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// Every field is optional: a field that is absent keeps the value from the
+/// command line / environment (see [`ModSecConfigJson::apply_to`]). Unknown
+/// keys are rejected, so a misspelled key fails the configure instead of being
+/// ignored. Keys are kebab-case; `rules`, `body-inspection` and
+/// `response-inspection` are accepted as aliases matching the CLI flags. A
+/// list may be given as a single string (the proxy turns a one-argument KDL
+/// node into a scalar).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ModSecConfigJson {
     /// Paths to ModSecurity rule files (glob patterns supported)
-    #[serde(default)]
-    pub rules_paths: Vec<String>,
+    #[serde(
+        default,
+        alias = "rules",
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rules_paths: Option<Vec<String>>,
     /// Block mode (true) or detect-only mode (false)
-    #[serde(default = "default_block_mode")]
-    pub block_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_mode: Option<bool>,
     /// Paths to exclude from inspection
-    #[serde(default)]
-    pub exclude_paths: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "one_or_many",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exclude_paths: Option<Vec<String>>,
     /// Enable request body inspection
-    #[serde(default = "default_body_inspection")]
-    pub body_inspection_enabled: bool,
+    #[serde(
+        default,
+        alias = "body-inspection",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub body_inspection_enabled: Option<bool>,
     /// Maximum body size to inspect in bytes
-    #[serde(default = "default_max_body_size")]
-    pub max_body_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_size: Option<usize>,
     /// Enable response body inspection
-    #[serde(default)]
-    pub response_inspection_enabled: bool,
+    #[serde(
+        default,
+        alias = "response-inspection",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub response_inspection_enabled: Option<bool>,
 }
 
-fn default_block_mode() -> bool {
-    true
+/// Accept a list as a JSON array or as a single string.
+fn one_or_many<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(Some(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    }))
 }
 
-fn default_body_inspection() -> bool {
-    true
+/// Trim the entries of a list from the config block and drop empty ones.
+/// A list that was given but has nothing left is an error: it is almost
+/// always a mistake (`rules-paths ""`), and taking it literally would turn
+/// inspection off.
+fn clean_list(key: &str, list: &[String]) -> std::result::Result<Vec<String>, String> {
+    let cleaned: Vec<String> = list
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if cleaned.is_empty() {
+        return Err(format!(
+            "`{key}` is empty; omit it to keep the value from the command line"
+        ));
+    }
+    Ok(cleaned)
 }
 
-fn default_max_body_size() -> usize {
-    1048576 // 1MB
+impl ModSecConfigJson {
+    /// Parse a configure payload. Rejects anything but an object, unknown
+    /// keys and wrongly typed values.
+    pub fn from_value(value: serde_json::Value) -> std::result::Result<Self, String> {
+        if !value.is_object() {
+            return Err(format!("expected an object, got {}", json_kind(&value)));
+        }
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    /// Overlay these settings on `base`: a field that is present replaces the
+    /// base value, an absent one keeps it.
+    pub fn apply_to(&self, base: &ModSecConfig) -> std::result::Result<ModSecConfig, String> {
+        let mut config = base.clone();
+        if let Some(rules) = &self.rules_paths {
+            config.rules_paths = clean_list("rules-paths", rules)?;
+        }
+        if let Some(block_mode) = self.block_mode {
+            config.block_mode = block_mode;
+        }
+        if let Some(exclude) = &self.exclude_paths {
+            config.exclude_paths = if exclude.is_empty() {
+                Vec::new()
+            } else {
+                clean_list("exclude-paths", exclude)?
+            };
+        }
+        if let Some(body) = self.body_inspection_enabled {
+            config.body_inspection_enabled = body;
+        }
+        if let Some(max) = self.max_body_size {
+            if max == 0 {
+                return Err("`max-body-size` must be greater than 0".to_string());
+            }
+            config.max_body_size = max;
+        }
+        if let Some(response) = self.response_inspection_enabled {
+            config.response_inspection_enabled = response;
+        }
+        Ok(config)
+    }
 }
 
-impl From<ModSecConfigJson> for ModSecConfig {
-    fn from(json: ModSecConfigJson) -> Self {
-        Self {
-            rules_paths: json.rules_paths,
-            block_mode: json.block_mode,
-            exclude_paths: json.exclude_paths,
-            body_inspection_enabled: json.body_inspection_enabled,
-            max_body_size: json.max_body_size,
-            response_inspection_enabled: json.response_inspection_enabled,
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// A stable hash of a JSON value, independent of object key order: FNV-1a
+/// over the value serialized with every object's keys sorted.
+pub fn config_hash(value: &serde_json::Value) -> u64 {
+    fn canonical(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (i, key) in keys.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::Value::String(key.clone()).to_string());
+                    out.push(':');
+                    canonical(&map[key], out);
+                }
+                out.push('}');
+            }
+            serde_json::Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    canonical(item, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
         }
     }
+    let mut text = String::new();
+    canonical(value, &mut text);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
 }
 
 /// Detection result from ModSecurity
@@ -131,11 +296,25 @@ pub struct ModSecEngine {
     modsec: ModSecurity,
     rules: Rules,
     pub config: ModSecConfig,
+    /// Number of rule files loaded from `config.rules_paths`
+    pub rule_files: usize,
 }
 
 impl ModSecEngine {
     /// Create a new ModSecurity engine with the given configuration
     pub fn new(config: ModSecConfig) -> Result<Self> {
+        Self::build(config, false)
+    }
+
+    /// Like [`ModSecEngine::new`], but every rules pattern must match at
+    /// least one file. Used when the rules came from a `config { }` block, so
+    /// a misspelled path fails the configure instead of silently loading
+    /// fewer (or zero) rules.
+    pub fn new_strict(config: ModSecConfig) -> Result<Self> {
+        Self::build(config, true)
+    }
+
+    fn build(config: ModSecConfig, strict: bool) -> Result<Self> {
         let modsec = ModSecurity::default();
         let mut rules = Rules::new();
 
@@ -169,6 +348,7 @@ impl ModSecEngine {
         // Load rules from configured paths
         let mut loaded_count = 0;
         for path_pattern in &config.rules_paths {
+            let before = loaded_count;
             // Handle glob patterns
             let paths = glob::glob(path_pattern)
                 .map_err(|e| anyhow::anyhow!("Invalid glob pattern '{}': {}", path_pattern, e))?;
@@ -195,6 +375,9 @@ impl ModSecEngine {
                     }
                 }
             }
+            if strict && loaded_count == before {
+                anyhow::bail!("rules pattern '{}' matched no rule file", path_pattern);
+            }
         }
 
         info!(rules_files = loaded_count, "ModSecurity engine initialized");
@@ -203,6 +386,7 @@ impl ModSecEngine {
             modsec,
             rules,
             config,
+            rule_files: loaded_count,
         })
     }
 
@@ -234,30 +418,101 @@ struct PendingTransaction {
 pub struct ModSecAgent {
     engine: Arc<RwLock<ModSecEngine>>,
     pending_requests: Arc<RwLock<HashMap<String, PendingTransaction>>>,
+    /// The configuration from the command line / environment. A `config { }`
+    /// block is overlaid on this, never on a previous block.
+    base_config: ModSecConfig,
+    /// Hash of the last accepted configure payload. Also serializes
+    /// configures: the proxy sends one per pooled connection, concurrently.
+    last_configure: tokio::sync::Mutex<Option<u64>>,
 }
 
 impl ModSecAgent {
     pub fn new(config: ModSecConfig) -> Result<Self> {
-        let engine = ModSecEngine::new(config)?;
+        let engine = ModSecEngine::new(config.clone())?;
         Ok(Self {
             engine: Arc::new(RwLock::new(engine)),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            base_config: config,
+            last_configure: tokio::sync::Mutex::new(None),
         })
+    }
+
+    /// The configuration currently in effect.
+    pub async fn active_config(&self) -> ModSecConfig {
+        self.engine.read().await.config.clone()
+    }
+
+    /// Number of requests whose body is being buffered for inspection.
+    pub async fn pending_count(&self) -> usize {
+        self.pending_requests.read().await.len()
     }
 
     /// Reconfigure the agent with new settings
     ///
-    /// This rebuilds the ModSecurity engine with the new configuration.
-    /// In-flight requests using the old engine will complete normally.
+    /// The rule set is rebuilt only when the rule files or body inspection
+    /// changed; other settings are updated in place. Requests whose body is
+    /// still being buffered are kept and inspected with the new settings.
     pub async fn reconfigure(&self, config: ModSecConfig) -> Result<()> {
-        info!("Reconfiguring ModSecurity engine");
-        let new_engine = ModSecEngine::new(config)?;
-        let mut engine = self.engine.write().await;
-        *engine = new_engine;
-        // Clear pending requests since rules may have changed
-        let mut pending = self.pending_requests.write().await;
-        pending.clear();
-        info!("ModSecurity engine reconfigured successfully");
+        self.apply(config, false).await.map(|_| ())
+    }
+
+    /// Make `config` the active configuration. Returns the names of the
+    /// settings that changed (empty: nothing to do).
+    async fn apply(&self, config: ModSecConfig, strict: bool) -> Result<Vec<&'static str>> {
+        let current = self.active_config().await;
+        let changed = current.changed_keys(&config);
+        if changed.is_empty() {
+            return Ok(changed);
+        }
+        if current.needs_rebuild(&config) {
+            let new_engine = if strict {
+                ModSecEngine::new_strict(config)?
+            } else {
+                ModSecEngine::new(config)?
+            };
+            *self.engine.write().await = new_engine;
+        } else {
+            self.engine.write().await.config = config;
+        }
+        Ok(changed)
+    }
+
+    /// Handle a configure payload (the agent's `config { }` block): see the
+    /// README's Configuration section for the rules.
+    pub async fn configure(&self, config: serde_json::Value) -> std::result::Result<(), String> {
+        let hash = config_hash(&config);
+        let mut last = self.last_configure.lock().await;
+        if *last == Some(hash) {
+            debug!(
+                config_hash = format!("{hash:016x}"),
+                "Configuration unchanged"
+            );
+            return Ok(());
+        }
+
+        let overlay = ModSecConfigJson::from_value(config)
+            .map_err(|e| format!("invalid ModSecurity configuration: {e}"))?;
+        let effective = overlay
+            .apply_to(&self.base_config)
+            .map_err(|e| format!("invalid ModSecurity configuration: {e}"))?;
+        let rules_from_block = overlay.rules_paths.is_some();
+
+        let changed = self
+            .apply(effective, rules_from_block)
+            .await
+            .map_err(|e| format!("failed to load ModSecurity rules: {e:#}"))?;
+        if rules_from_block && self.engine.read().await.rule_files == 0 {
+            // Cannot happen with strict loading, but never report success
+            // for a configure that asked for rules and loaded none.
+            return Err("the configured rules loaded no rule file".to_string());
+        }
+
+        *last = Some(hash);
+        info!(
+            config_hash = format!("{hash:016x}"),
+            changed = ?changed,
+            "ModSecurity agent configured"
+        );
         Ok(())
     }
 
@@ -375,27 +630,13 @@ impl AgentHandlerV2 for ModSecAgent {
     }
 
     async fn on_configure(&self, config: serde_json::Value, version: Option<String>) -> bool {
-        debug!(version = ?version, "Received configure event");
-
-        // Parse the JSON config into ModSecConfigJson
-        let config_json: ModSecConfigJson = match serde_json::from_value(config) {
-            Ok(config) => config,
+        match self.configure(config).await {
+            Ok(()) => true,
             Err(e) => {
-                warn!(error = %e, "Failed to parse ModSecurity configuration");
-                // Return false to indicate configuration was not accepted
-                return false;
+                warn!(version = ?version, error = %e, "Rejected configuration");
+                false
             }
-        };
-
-        // Convert to internal config and reconfigure the engine
-        let config: ModSecConfig = config_json.into();
-        if let Err(e) = self.reconfigure(config).await {
-            warn!(error = %e, "Failed to reconfigure ModSecurity engine");
-            return false;
         }
-
-        info!(version = ?version, "ModSecurity agent configured successfully");
-        true
     }
 
     fn health_status(&self) -> HealthStatus {

@@ -84,12 +84,14 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Initialize tracing
+    // The library logs under its own target (zentinel_agent_modsec); the
+    // binary's target alone would hide every engine and configure message.
     let log_level = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(format!(
-            "{}={},zentinel_agent_protocol=info",
+            "{}={level},zentinel_agent_modsec={level},zentinel_agent_protocol=info",
             env!("CARGO_CRATE_NAME"),
-            log_level
+            level = log_level
         ))
         .json()
         .init();
