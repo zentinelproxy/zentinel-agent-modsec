@@ -273,9 +273,18 @@ any ModSecurity deployment. Proxy-side agent options are in the
 
 ## How it works
 
-On `request_headers` the agent runs ModSecurity phase 1 (URI, query string,
-headers). If that passes and body inspection is on, it buffers the body and
-runs phase 2 when the last chunk arrives.
+On `request_headers` the agent runs ModSecurity phases 1 and 2 (URI, query
+string, headers, and an empty body when the request is known to have no body).
+A body is known empty only when every `Content-Length` header value is `0`
+(missing `Content-Length` does not mean empty—HTTP/2 and chunked bodies may
+still follow). Those requests are not parked in `pending_requests`.
+
+When a body may still arrive and body inspection is on, the agent parks the
+request (up to a concurrency limit, with stale entries swept) and runs phase 2
+again on the last body chunk. Pending buffers are also dropped on
+`response_headers` and `request_complete`. When body inspection is enabled, a
+body chunk with no matching pending request is denied (fail-closed). Bodies over
+`max_body_size` skip inspection and are allowed.
 
 | Outcome | What the agent returns |
 |---|---|
