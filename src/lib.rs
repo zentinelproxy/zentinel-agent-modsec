@@ -501,8 +501,9 @@ pub struct ModSecAgent {
     /// Hash of the last accepted configure payload. Also serializes
     /// configures: the proxy sends one per pooled connection, concurrently.
     last_configure: tokio::sync::Mutex<Option<u64>>,
-    /// End of the current drain window (Unix ms), 0 when not draining. New
-    /// requests are refused until then; requests already in flight finish.
+    /// End of the current drain window (Unix ms), 0 when not draining. Only
+    /// reported through `health_status` (`Draining`); requests keep being
+    /// inspected normally, so the proxy decides where to route them.
     draining_until_ms: AtomicU64,
 }
 
@@ -882,10 +883,15 @@ impl AgentHandlerV2 for ModSecAgent {
             duration_ms = duration_ms,
             "ModSecurity agent draining"
         );
-        // Stop accepting new requests (see on_request_headers), but keep the
-        // bodies already being buffered: those requests are in flight and are
-        // still inspected when their last chunk arrives. Clearing them here
-        // let a body that straddled the drain through uninspected.
+        // Keep the bodies already being buffered: those requests are in
+        // flight and are still inspected when their last chunk arrives.
+        // Clearing them here let a body that straddled the drain through
+        // uninspected (#8).
+        //
+        // The drain is only signalled through health (`Draining`); requests
+        // that still arrive are inspected as usual. Refusing them with a block
+        // would reach the client as a WAF decision (a 503) instead of the
+        // route's failure mode.
         self.draining_until_ms
             .store(unix_now_ms().saturating_add(duration_ms), Ordering::Relaxed);
     }
@@ -893,22 +899,6 @@ impl AgentHandlerV2 for ModSecAgent {
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
         let path = &event.uri;
         let correlation_id = &event.metadata.correlation_id;
-
-        // A draining agent takes no new requests; in-flight ones finish. In
-        // detect-only mode the agent never blocks, so it keeps inspecting.
-        if self.drain_remaining_ms().is_some() && self.engine.read().await.config.block_mode {
-            info!(correlation_id, "Refusing new request while draining");
-            return AgentResponse::block(503, Some("Service Unavailable".to_string()))
-                .add_response_header(HeaderOp::Set {
-                    name: "X-WAF-Blocked".to_string(),
-                    value: "true".to_string(),
-                })
-                .with_audit(AuditMetadata {
-                    tags: vec!["modsec".to_string(), "draining".to_string()],
-                    reason_codes: vec!["agent draining".to_string()],
-                    ..Default::default()
-                });
-        }
 
         // Check exclusions
         {
