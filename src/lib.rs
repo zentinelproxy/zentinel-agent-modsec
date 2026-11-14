@@ -23,6 +23,7 @@ use base64::Engine;
 use modsecurity::{ModSecurity, Rules};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -500,6 +501,17 @@ pub struct ModSecAgent {
     /// Hash of the last accepted configure payload. Also serializes
     /// configures: the proxy sends one per pooled connection, concurrently.
     last_configure: tokio::sync::Mutex<Option<u64>>,
+    /// End of the current drain window (Unix ms), 0 when not draining. New
+    /// requests are refused until then; requests already in flight finish.
+    draining_until_ms: AtomicU64,
+}
+
+/// Current Unix time in milliseconds.
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl ModSecAgent {
@@ -510,7 +522,15 @@ impl ModSecAgent {
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             base_config: config,
             last_configure: tokio::sync::Mutex::new(None),
+            draining_until_ms: AtomicU64::new(0),
         })
+    }
+
+    /// Milliseconds left in the current drain window, if the agent is draining.
+    fn drain_remaining_ms(&self) -> Option<u64> {
+        let until = self.draining_until_ms.load(Ordering::Relaxed);
+        let now = unix_now_ms();
+        (until > now).then(|| until - now)
     }
 
     /// The configuration currently in effect.
@@ -830,8 +850,14 @@ impl AgentHandlerV2 for ModSecAgent {
     }
 
     fn health_status(&self) -> HealthStatus {
-        // Return healthy status with agent ID
-        HealthStatus::healthy("zentinel-modsec-agent")
+        let mut status = HealthStatus::healthy("zentinel-modsec-agent");
+        if let Some(eta_ms) = self.drain_remaining_ms() {
+            status.state = zentinel_agent_protocol::v2::HealthState::Draining {
+                eta_ms: Some(eta_ms),
+            };
+            status.message = Some("Agent is draining".to_string());
+        }
+        status
     }
 
     fn metrics_report(&self) -> Option<MetricsReport> {
@@ -856,14 +882,33 @@ impl AgentHandlerV2 for ModSecAgent {
             duration_ms = duration_ms,
             "ModSecurity agent draining"
         );
-        // Stop accepting new requests - clear pending to signal draining
-        let mut pending = self.pending_requests.write().await;
-        pending.clear();
+        // Stop accepting new requests (see on_request_headers), but keep the
+        // bodies already being buffered: those requests are in flight and are
+        // still inspected when their last chunk arrives. Clearing them here
+        // let a body that straddled the drain through uninspected.
+        self.draining_until_ms
+            .store(unix_now_ms().saturating_add(duration_ms), Ordering::Relaxed);
     }
 
     async fn on_request_headers(&self, event: RequestHeadersEvent) -> AgentResponse {
         let path = &event.uri;
         let correlation_id = &event.metadata.correlation_id;
+
+        // A draining agent takes no new requests; in-flight ones finish. In
+        // detect-only mode the agent never blocks, so it keeps inspecting.
+        if self.drain_remaining_ms().is_some() && self.engine.read().await.config.block_mode {
+            info!(correlation_id, "Refusing new request while draining");
+            return AgentResponse::block(503, Some("Service Unavailable".to_string()))
+                .add_response_header(HeaderOp::Set {
+                    name: "X-WAF-Blocked".to_string(),
+                    value: "true".to_string(),
+                })
+                .with_audit(AuditMetadata {
+                    tags: vec!["modsec".to_string(), "draining".to_string()],
+                    reason_codes: vec!["agent draining".to_string()],
+                    ..Default::default()
+                });
+        }
 
         // Check exclusions
         {
