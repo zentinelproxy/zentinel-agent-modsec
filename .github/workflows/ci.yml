@@ -57,7 +57,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
-            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
+            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
       - name: Cache libmodsecurity
         id: cache-modsec
         uses: actions/cache@v5
@@ -66,7 +66,7 @@ jobs:
             /usr/local/lib/libmodsecurity*
             /usr/local/lib/pkgconfig/modsecurity.pc
             /usr/local/include/modsecurity
-          key: ${{ runner.os }}-libmodsecurity-3.0.14-v2
+          key: ${{ runner.os }}-libmodsecurity-3.0.14-v3-pcre2
       - name: Build libmodsecurity from source
         if: steps.cache-modsec.outputs.cache-hit != 'true'
         run: |
@@ -74,7 +74,9 @@ jobs:
           cd /tmp/modsecurity
           git submodule init && git submodule update
           ./build.sh
-          ./configure --prefix=/usr/local --without-lmdb
+          # PCRE1 is end-of-life and no longer packaged in the runner image
+          # (ubuntu-26.04); build libmodsecurity against PCRE2 instead.
+          ./configure --prefix=/usr/local --without-lmdb --with-pcre2
           make -j$(nproc)
           sudo make install
       - name: Update linker cache
@@ -107,7 +109,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
-            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
+            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
       - name: Cache libmodsecurity
         id: cache-modsec
         uses: actions/cache@v5
@@ -116,7 +118,7 @@ jobs:
             /usr/local/lib/libmodsecurity*
             /usr/local/lib/pkgconfig/modsecurity.pc
             /usr/local/include/modsecurity
-          key: ${{ runner.os }}-libmodsecurity-3.0.14-v2
+          key: ${{ runner.os }}-libmodsecurity-3.0.14-v3-pcre2
       - name: Build libmodsecurity from source
         if: steps.cache-modsec.outputs.cache-hit != 'true'
         run: |
@@ -124,7 +126,9 @@ jobs:
           cd /tmp/modsecurity
           git submodule init && git submodule update
           ./build.sh
-          ./configure --prefix=/usr/local --without-lmdb
+          # PCRE1 is end-of-life and no longer packaged in the runner image
+          # (ubuntu-26.04); build libmodsecurity against PCRE2 instead.
+          ./configure --prefix=/usr/local --without-lmdb --with-pcre2
           make -j$(nproc)
           sudo make install
       - name: Update linker cache
@@ -165,7 +169,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
-            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
+            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
       - name: Cache libmodsecurity
         id: cache-modsec
         uses: actions/cache@v5
@@ -174,7 +178,7 @@ jobs:
             /usr/local/lib/libmodsecurity*
             /usr/local/lib/pkgconfig/modsecurity.pc
             /usr/local/include/modsecurity
-          key: ${{ runner.os }}-libmodsecurity-3.0.14-v2
+          key: ${{ runner.os }}-libmodsecurity-3.0.14-v3-pcre2
       - name: Build libmodsecurity from source
         if: steps.cache-modsec.outputs.cache-hit != 'true'
         run: |
@@ -182,7 +186,9 @@ jobs:
           cd /tmp/modsecurity
           git submodule init && git submodule update
           ./build.sh
-          ./configure --prefix=/usr/local --without-lmdb
+          # PCRE1 is end-of-life and no longer packaged in the runner image
+          # (ubuntu-26.04); build libmodsecurity against PCRE2 instead.
+          ./configure --prefix=/usr/local --without-lmdb --with-pcre2
           make -j$(nproc)
           sudo make install
       - name: Update linker cache
