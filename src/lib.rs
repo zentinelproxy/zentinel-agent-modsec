@@ -37,14 +37,22 @@ use zentinel_agent_protocol::{
     RequestHeadersEvent, ResponseBodyChunkEvent, ResponseHeadersEvent,
 };
 
-/// Maximum concurrent requests buffered for body inspection.
+/// Maximum number of requests parked in `pending_requests`. At the cap a new
+/// request is refused (fail-closed in block mode); no parked entry is evicted to
+/// make room, so a client cannot push its own parked request out and then send
+/// its body uninspected.
 #[cfg(test)]
 const PENDING_REQUESTS_MAX: usize = 10;
 #[cfg(not(test))]
 const PENDING_REQUESTS_MAX: usize = 100_000;
 
-/// Drop pending body buffers when the proxy never finishes the request.
-const PENDING_REQUEST_MAX_AGE_MS: u64 = 120_000;
+/// A pending entry that saw no event for this long is dropped. Every body chunk
+/// refreshes it, so only idle requests expire, not slow uploads. A body chunk
+/// that arrives after its entry expired fails closed.
+const PENDING_REQUEST_IDLE_MS: u64 = 120_000;
+
+/// The idle sweep walks the whole map, so it runs at most this often.
+const PENDING_SWEEP_INTERVAL_MS: u64 = 1_000;
 
 /// ModSecurity configuration
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,19 +432,43 @@ struct PendingTransaction {
     uri: String,
     headers: HashMap<String, Vec<String>>,
     client_ip: String,
-    created_at_ms: u64,
-    /// The body grew past `max_body_size`: finish the request without inspection
-    /// instead of dropping the entry (a later chunk would look like an unknown
-    /// correlation and fail closed mid-request).
+    /// Last event for this request (Unix ms): the headers or a body chunk.
+    last_seen_ms: u64,
+    /// The body is not inspected, by configuration: the path is excluded, the
+    /// headers were already a detect-only detection, the headers hit an engine
+    /// error (logged, allowed), or the body grew past `max_body_size`. The
+    /// entry stays until the last chunk so the remaining chunks are not taken
+    /// for an unknown correlation and blocked.
     inspection_skipped: bool,
 }
 
-/// Current Unix time in milliseconds.
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+impl PendingTransaction {
+    /// A request whose body is buffered and inspected on the last chunk.
+    fn inspect(event: &RequestHeadersEvent, now_ms: u64) -> Self {
+        Self {
+            body: BodyAccumulator::default(),
+            method: event.method.clone(),
+            uri: event.uri.clone(),
+            headers: event.headers.clone(),
+            client_ip: event.metadata.client_ip.clone(),
+            last_seen_ms: now_ms,
+            inspection_skipped: false,
+        }
+    }
+
+    /// A marker for a request whose body is allowed by configuration. It
+    /// holds no copy of the request.
+    fn skipped(now_ms: u64) -> Self {
+        Self {
+            body: BodyAccumulator::default(),
+            method: String::new(),
+            uri: String::new(),
+            headers: HashMap::new(),
+            client_ip: String::new(),
+            last_seen_ms: now_ms,
+            inspection_skipped: true,
+        }
+    }
 }
 
 /// True when the request is known to carry no body.
@@ -460,9 +492,9 @@ fn request_has_known_empty_body(headers: &HashMap<String, Vec<String>>) -> bool 
             .all(|v| v.trim().parse::<u64>().map(|n| n == 0).unwrap_or(false))
 }
 
-/// Remove pending body buffers older than [`PENDING_REQUEST_MAX_AGE_MS`].
+/// Remove pending entries idle for longer than [`PENDING_REQUEST_IDLE_MS`].
 fn sweep_stale_pending(pending: &mut HashMap<String, PendingTransaction>, now_ms: u64) {
-    pending.retain(|_, tx| now_ms.saturating_sub(tx.created_at_ms) <= PENDING_REQUEST_MAX_AGE_MS);
+    pending.retain(|_, tx| now_ms.saturating_sub(tx.last_seen_ms) <= PENDING_REQUEST_IDLE_MS);
 }
 
 /// Block with 403 when inspection state is missing or invalid (fail-closed).
@@ -581,6 +613,8 @@ pub struct ModSecAgent {
     /// reported through `health_status` (`Draining`); requests keep being
     /// inspected normally, so the proxy decides where to route them.
     draining_until_ms: AtomicU64,
+    /// When the idle sweep of `pending_requests` last ran (Unix ms).
+    last_sweep_ms: AtomicU64,
 }
 
 /// Current Unix time in milliseconds.
@@ -600,6 +634,7 @@ impl ModSecAgent {
             base_config: config,
             last_configure: tokio::sync::Mutex::new(None),
             draining_until_ms: AtomicU64::new(0),
+            last_sweep_ms: AtomicU64::new(0),
         })
     }
 
@@ -687,6 +722,42 @@ impl ModSecAgent {
             "ModSecurity agent configured"
         );
         Ok(())
+    }
+
+    /// Park `entry` until its body arrives.
+    ///
+    /// Returns a response when the request must be refused because the map is
+    /// full: a fail-closed block in block mode. In detect-only mode a full map
+    /// never blocks: the request is allowed and not parked, and its body
+    /// chunks, if any, are logged and allowed.
+    async fn park(
+        &self,
+        correlation_id: &str,
+        entry: PendingTransaction,
+        block_mode: bool,
+    ) -> Option<AgentResponse> {
+        let now = entry.last_seen_ms;
+        let mut pending = self.pending_requests.write().await;
+        let last_sweep = self.last_sweep_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last_sweep) >= PENDING_SWEEP_INTERVAL_MS {
+            self.last_sweep_ms.store(now, Ordering::Relaxed);
+            sweep_stale_pending(&mut pending, now);
+        }
+        if pending.len() >= PENDING_REQUESTS_MAX && !pending.contains_key(correlation_id) {
+            if block_mode {
+                return Some(fail_closed_block_response(
+                    correlation_id,
+                    "pending request capacity exceeded",
+                ));
+            }
+            warn!(
+                correlation_id,
+                "Pending request capacity exceeded; detect-only mode, allowing without body inspection"
+            );
+            return None;
+        }
+        pending.insert(correlation_id.to_string(), entry);
+        None
     }
 
     /// Process a complete request through ModSecurity
@@ -984,18 +1055,38 @@ impl AgentHandlerV2 for ModSecAgent {
         let path = &event.uri;
         let correlation_id = &event.metadata.correlation_id;
 
-        // Check exclusions
-        {
+        let (excluded, block_mode, body_inspection_enabled) = {
             let engine = self.engine.read().await;
-            if engine.is_excluded(path) {
-                debug!(path = path, "Path excluded from ModSecurity");
-                return AgentResponse::default_allow();
+            (
+                engine.is_excluded(path),
+                engine.config.block_mode,
+                engine.config.body_inspection_enabled,
+            )
+        };
+        // Whether a body may still follow for which a chunk event can arrive.
+        // Only `Content-Length: 0` proves there is none.
+        let body_may_follow =
+            body_inspection_enabled && !request_has_known_empty_body(&event.headers);
+        let now = unix_now_ms();
+
+        if excluded {
+            debug!(path = path, "Path excluded from ModSecurity");
+            // The body is allowed by configuration; a marker keeps its chunks
+            // from being taken for an unknown correlation.
+            if body_may_follow {
+                if let Some(refused) = self
+                    .park(correlation_id, PendingTransaction::skipped(now), block_mode)
+                    .await
+                {
+                    return refused;
+                }
             }
+            return AgentResponse::default_allow();
         }
 
         // Run phases 1 and 2 now, with an empty body, so attacks in the URI,
-        // query string and headers are decided here. When a body is still
-        // expected, phase 2 runs again with the accumulated body on the last
+        // query string and headers are decided here. When a body may still
+        // follow, phase 2 runs again with the accumulated body on the last
         // chunk. Known-empty bodies (`Content-Length: 0` only) finish here and
         // are not parked.
         let empty: &[u8] = &[];
@@ -1011,46 +1102,54 @@ impl AgentHandlerV2 for ModSecAgent {
             )
             .await
         {
-            Ok(Some(verdict)) => self.respond(verdict, "headers", correlation_id).await,
-            Ok(None) => {
-                let engine = self.engine.read().await;
-                if engine.config.body_inspection_enabled
-                    && !request_has_known_empty_body(&event.headers)
-                {
-                    let now = current_time_ms();
-                    let mut pending = self.pending_requests.write().await;
-                    sweep_stale_pending(&mut pending, now);
-                    if pending.len() >= PENDING_REQUESTS_MAX {
-                        return fail_closed_block_response(
-                            correlation_id,
-                            "pending request capacity exceeded",
-                        );
+            Ok(Some(verdict)) => {
+                // Block mode: the request ends here and nothing is parked.
+                // Detect-only: the request goes on; its body is not inspected
+                // again (the detection is already logged), so park a marker.
+                if !block_mode && body_may_follow {
+                    if let Some(refused) = self
+                        .park(correlation_id, PendingTransaction::skipped(now), block_mode)
+                        .await
+                    {
+                        return refused;
                     }
-                    pending.insert(
-                        correlation_id.clone(),
-                        PendingTransaction {
-                            body: BodyAccumulator::default(),
-                            method: event.method.clone(),
-                            uri: event.uri.clone(),
-                            headers: event.headers.clone(),
-                            client_ip: event.metadata.client_ip.clone(),
-                            created_at_ms: now,
-                            inspection_skipped: false,
-                        },
-                    );
+                }
+                self.respond(verdict, "headers", correlation_id).await
+            }
+            Ok(None) => {
+                if body_may_follow {
+                    if let Some(refused) = self
+                        .park(
+                            correlation_id,
+                            PendingTransaction::inspect(&event, now),
+                            block_mode,
+                        )
+                        .await
+                    {
+                        return refused;
+                    }
                 }
                 AgentResponse::default_allow()
             }
             Err(e) => {
+                // Engine errors allow (documented); the body is not inspected
+                // either, so park a marker for it.
                 warn!(error = %e, "ModSecurity processing error");
+                if body_may_follow {
+                    if let Some(refused) = self
+                        .park(correlation_id, PendingTransaction::skipped(now), block_mode)
+                        .await
+                    {
+                        return refused;
+                    }
+                }
                 AgentResponse::default_allow()
             }
         }
     }
 
     async fn on_request_complete(&self, event: RequestCompleteEvent) -> AgentResponse {
-        // A request that never sent a body leaves its pending entry behind;
-        // drop it when the proxy reports the request finished.
+        // Sent by Zentinel 26.11_3 and later when the request is finished.
         self.pending_requests
             .write()
             .await
@@ -1059,8 +1158,10 @@ impl AgentHandlerV2 for ModSecAgent {
     }
 
     async fn on_response_headers(&self, event: ResponseHeadersEvent) -> AgentResponse {
-        // Upstream responses start before the proxy always sends RequestComplete;
-        // drop any body buffer so bodyless requests cannot pin memory.
+        // Once the response has started, no request body is inspected any
+        // more. This releases the entry of a request that sent no body even
+        // when the proxy never sends RequestComplete; a body chunk that still
+        // arrives finds no entry and fails closed.
         self.pending_requests
             .write()
             .await
@@ -1071,98 +1172,114 @@ impl AgentHandlerV2 for ModSecAgent {
     async fn on_request_body_chunk(&self, event: RequestBodyChunkEvent) -> AgentResponse {
         let correlation_id = &event.correlation_id;
 
-        let body_inspection_enabled = self.engine.read().await.config.body_inspection_enabled;
+        let (body_inspection_enabled, block_mode, max_body_size) = {
+            let engine = self.engine.read().await;
+            (
+                engine.config.body_inspection_enabled,
+                engine.config.block_mode,
+                engine.config.max_body_size,
+            )
+        };
         if !body_inspection_enabled {
             return AgentResponse::default_allow();
         }
 
-        let chunk = match base64::engine::general_purpose::STANDARD.decode(&event.data) {
-            Ok(data) => data,
-            Err(e) => {
-                warn!(error = %e, "Failed to decode body chunk");
-                return fail_closed_block_response(correlation_id, "invalid body chunk encoding");
-            }
-        };
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&event.data);
 
         let mut pending = self.pending_requests.write().await;
-        let engine = self.engine.read().await;
-
-        if !pending.contains_key(correlation_id) {
-            return fail_closed_block_response(correlation_id, "no pending request for body chunk");
-        }
-
-        if pending
-            .get(correlation_id)
-            .is_some_and(|tx| tx.inspection_skipped)
-        {
-            if event.is_last {
-                pending.remove(correlation_id);
+        let Some(tx) = pending.get_mut(correlation_id) else {
+            // No entry: the request was never parked (refused at the cap in
+            // detect-only mode), or its entry was released (response started,
+            // idle timeout). Never let the body through because state is
+            // missing, except in detect-only mode, which never blocks.
+            drop(pending);
+            if block_mode {
+                return fail_closed_block_response(
+                    correlation_id,
+                    "no pending request for body chunk",
+                );
             }
+            warn!(
+                correlation_id,
+                "Body chunk with no pending request; detect-only mode, allowing without inspection"
+            );
             return AgentResponse::default_allow();
-        }
-
-        let over_limit = pending
-            .get(correlation_id)
-            .is_some_and(|tx| tx.body.data.len() + chunk.len() > engine.config.max_body_size);
-        if over_limit {
-            debug!(correlation_id = correlation_id, "Body exceeds max size");
-            if let Some(tx) = pending.get_mut(correlation_id) {
-                tx.inspection_skipped = true;
-                // Release the part that was buffered; it will not be inspected.
-                tx.body.data = Vec::new();
-            }
-            if event.is_last {
-                pending.remove(correlation_id);
-            }
-            return AgentResponse::default_allow();
-        }
-
-        let should_process = match pending.get_mut(correlation_id) {
-            Some(tx) => {
-                tx.body.data.extend(chunk);
-                event.is_last
-            }
-            None => false,
         };
-        drop(engine);
+        tx.last_seen_ms = unix_now_ms();
+
+        let chunk = match decoded {
+            Ok(data) => data,
+            Err(e) => {
+                if block_mode {
+                    pending.remove(correlation_id);
+                    drop(pending);
+                    warn!(error = %e, "Failed to decode body chunk");
+                    return fail_closed_block_response(
+                        correlation_id,
+                        "invalid body chunk encoding",
+                    );
+                }
+                warn!(
+                    correlation_id,
+                    error = %e,
+                    "Failed to decode body chunk; detect-only mode, body not inspected"
+                );
+                tx.inspection_skipped = true;
+                tx.body.data = Vec::new();
+                if event.is_last {
+                    pending.remove(correlation_id);
+                }
+                return AgentResponse::default_allow();
+            }
+        };
+
+        if tx.inspection_skipped {
+            if event.is_last {
+                pending.remove(correlation_id);
+            }
+            return AgentResponse::default_allow();
+        }
+
+        if tx.body.data.len() + chunk.len() > max_body_size {
+            debug!(correlation_id = correlation_id, "Body exceeds max size");
+            // Allowed by configuration (`max-body-size`). Free what was
+            // buffered and keep the entry as a marker until the last chunk.
+            tx.inspection_skipped = true;
+            tx.body.data = Vec::new();
+            if event.is_last {
+                pending.remove(correlation_id);
+            }
+            return AgentResponse::default_allow();
+        }
+
+        tx.body.data.extend(chunk);
+        if !event.is_last {
+            return AgentResponse::default_allow();
+        }
+
+        let pending_tx = pending
+            .remove(correlation_id)
+            .expect("entry was found under the same lock");
         drop(pending);
 
-        if should_process {
-            let pending_tx = {
-                let mut pending = self.pending_requests.write().await;
-                match pending.remove(correlation_id) {
-                    Some(tx) => tx,
-                    None => {
-                        return fail_closed_block_response(
-                            correlation_id,
-                            "no pending request for body chunk",
-                        );
-                    }
-                }
-            };
-
-            match self
-                .process_request(
-                    correlation_id,
-                    &pending_tx.method,
-                    &pending_tx.uri,
-                    &pending_tx.headers,
-                    Some(&pending_tx.body.data),
-                    &pending_tx.client_ip,
-                )
-                .await
-            {
-                Ok(Some(verdict)) => {
-                    return self.respond(verdict, "body", correlation_id).await;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(error = %e, "ModSecurity body processing error");
-                }
+        match self
+            .process_request(
+                correlation_id,
+                &pending_tx.method,
+                &pending_tx.uri,
+                &pending_tx.headers,
+                Some(&pending_tx.body.data),
+                &pending_tx.client_ip,
+            )
+            .await
+        {
+            Ok(Some(verdict)) => self.respond(verdict, "body", correlation_id).await,
+            Ok(None) => AgentResponse::default_allow(),
+            Err(e) => {
+                warn!(error = %e, "ModSecurity body processing error");
+                AgentResponse::default_allow()
             }
         }
-
-        AgentResponse::default_allow()
     }
 
     async fn on_response_body_chunk(&self, event: ResponseBodyChunkEvent) -> AgentResponse {
@@ -1433,12 +1550,14 @@ mod tests {
                 uri: "/x".to_string(),
                 headers: HashMap::new(),
                 client_ip: "127.0.0.1".to_string(),
-                created_at_ms: 0,
+                last_seen_ms: 0,
                 inspection_skipped: false,
             },
         );
-        sweep_stale_pending(&mut pending, PENDING_REQUEST_MAX_AGE_MS + 1);
-        assert!(pending.is_empty());
+        pending.insert("fresh".to_string(), PendingTransaction::skipped(1_000));
+        sweep_stale_pending(&mut pending, PENDING_REQUEST_IDLE_MS + 1);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_key("fresh"));
     }
 
     /// Regression: requests with `Content-Length: 0` must not accumulate `pending_requests` (OOM).
@@ -1705,5 +1824,275 @@ mod tests {
             denied.decision,
             Decision::Block { status: 403, .. }
         ));
+    }
+
+    async fn test_agent_with_rule(
+        rule: &str,
+        block_mode: bool,
+    ) -> (tempfile::TempDir, ModSecAgent) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("rules.conf"), rule).unwrap();
+        let config = ModSecConfig {
+            rules_paths: vec![dir.path().join("rules.conf").display().to_string()],
+            block_mode,
+            ..Default::default()
+        };
+        (dir, ModSecAgent::new(config).unwrap())
+    }
+
+    const BODY_RULE: &str =
+        r#"SecRule REQUEST_BODY "@contains UNION SELECT" "id:6002,phase:2,deny,status:403""#;
+
+    /// At the cap nothing is evicted: a client cannot flood new requests to
+    /// push its own parked request out and then send the body uninspected.
+    /// The parked request's body is still inspected and blocked.
+    #[tokio::test]
+    async fn test_cap_does_not_evict_parked_request() {
+        use zentinel_agent_protocol::v2::AgentHandlerV2;
+        use zentinel_agent_protocol::Decision;
+
+        let (_dir, agent) = test_agent_with_rule(BODY_RULE, true).await;
+        for i in 0..PENDING_REQUESTS_MAX {
+            agent
+                .on_request_headers(test_headers_event(
+                    &format!("park-{i}"),
+                    "POST",
+                    "/submit",
+                    HashMap::new(),
+                ))
+                .await;
+        }
+        for i in 0..1_000 {
+            let flood = agent
+                .on_request_headers(test_headers_event(
+                    &format!("flood-{i}"),
+                    "GET",
+                    "/",
+                    HashMap::new(),
+                ))
+                .await;
+            assert!(matches!(
+                flood.decision,
+                Decision::Block { status: 403, .. }
+            ));
+        }
+        assert_eq!(agent.pending_count().await, PENDING_REQUESTS_MAX);
+
+        let body = agent
+            .on_request_body_chunk(test_body_chunk_event(
+                "park-0",
+                b"id=1 UNION SELECT password",
+                true,
+            ))
+            .await;
+        assert!(
+            matches!(body.decision, Decision::Block { status: 403, .. }),
+            "the parked body must still be inspected"
+        );
+    }
+
+    /// Detect-only mode never blocks because of the cap: the request over the
+    /// cap and its body are allowed.
+    #[tokio::test]
+    async fn test_cap_in_detect_only_never_blocks() {
+        use zentinel_agent_protocol::v2::AgentHandlerV2;
+        use zentinel_agent_protocol::Decision;
+
+        let (_dir, agent) = test_agent_with_rule(BODY_RULE, false).await;
+        for i in 0..PENDING_REQUESTS_MAX {
+            agent
+                .on_request_headers(test_headers_event(
+                    &format!("park-{i}"),
+                    "POST",
+                    "/submit",
+                    HashMap::new(),
+                ))
+                .await;
+        }
+        let over = agent
+            .on_request_headers(test_headers_event(
+                "over-cap",
+                "POST",
+                "/submit",
+                HashMap::new(),
+            ))
+            .await;
+        assert!(matches!(over.decision, Decision::Allow));
+        assert_eq!(agent.pending_count().await, PENDING_REQUESTS_MAX);
+
+        let body = agent
+            .on_request_body_chunk(test_body_chunk_event("over-cap", b"payload", true))
+            .await;
+        assert!(matches!(body.decision, Decision::Allow));
+    }
+
+    /// A body chunk refreshes the idle timer, so a slow upload is not swept
+    /// while it is still streaming.
+    #[tokio::test]
+    async fn test_body_chunk_refreshes_idle_timer() {
+        use zentinel_agent_protocol::v2::AgentHandlerV2;
+        use zentinel_agent_protocol::Decision;
+
+        let (_dir, agent) = test_agent_with_rule(BODY_RULE, true).await;
+        agent
+            .on_request_headers(test_headers_event(
+                "slow",
+                "POST",
+                "/upload",
+                HashMap::new(),
+            ))
+            .await;
+        // Pretend the request started well over the idle timeout ago.
+        let started = unix_now_ms() - 2 * PENDING_REQUEST_IDLE_MS;
+        agent
+            .pending_requests
+            .write()
+            .await
+            .get_mut("slow")
+            .unwrap()
+            .last_seen_ms = started;
+
+        let chunk = agent
+            .on_request_body_chunk(test_body_chunk_event("slow", b"id=1 ", false))
+            .await;
+        assert!(matches!(chunk.decision, Decision::Allow));
+        {
+            let mut pending = agent.pending_requests.write().await;
+            sweep_stale_pending(&mut pending, unix_now_ms());
+            assert!(
+                pending.contains_key("slow"),
+                "a streaming upload is not idle"
+            );
+        }
+
+        let last = agent
+            .on_request_body_chunk(test_body_chunk_event(
+                "slow",
+                b"UNION SELECT password",
+                true,
+            ))
+            .await;
+        assert!(matches!(last.decision, Decision::Block { status: 403, .. }));
+        assert_eq!(agent.pending_count().await, 0);
+    }
+
+    /// An entry dropped by the idle sweep fails closed when its body shows up.
+    #[tokio::test]
+    async fn test_body_after_idle_sweep_fails_closed() {
+        use zentinel_agent_protocol::v2::AgentHandlerV2;
+        use zentinel_agent_protocol::Decision;
+
+        let (_dir, agent) = test_agent_with_rule(BODY_RULE, true).await;
+        agent
+            .on_request_headers(test_headers_event(
+                "idle",
+                "POST",
+                "/submit",
+                HashMap::new(),
+            ))
+            .await;
+        agent
+            .pending_requests
+            .write()
+            .await
+            .get_mut("idle")
+            .unwrap()
+            .last_seen_ms = 0;
+        agent.last_sweep_ms.store(0, Ordering::Relaxed);
+        // The next park runs the sweep.
+        agent
+            .on_request_headers(test_headers_event(
+                "next",
+                "POST",
+                "/submit",
+                HashMap::new(),
+            ))
+            .await;
+        assert!(!agent.pending_requests.read().await.contains_key("idle"));
+
+        let body = agent
+            .on_request_body_chunk(test_body_chunk_event("idle", b"anything", true))
+            .await;
+        assert!(matches!(body.decision, Decision::Block { status: 403, .. }));
+    }
+
+    /// The sweep walks the map at most once per interval, not on every park.
+    #[tokio::test]
+    async fn test_sweep_is_rate_limited() {
+        use zentinel_agent_protocol::v2::AgentHandlerV2;
+
+        let agent = test_agent_minimal().await;
+        agent
+            .on_request_headers(test_headers_event("a", "POST", "/", HashMap::new()))
+            .await;
+        agent
+            .pending_requests
+            .write()
+            .await
+            .get_mut("a")
+            .unwrap()
+            .last_seen_ms = 0;
+        // A sweep just ran: the stale entry survives the next park.
+        agent.last_sweep_ms.store(unix_now_ms(), Ordering::Relaxed);
+        agent
+            .on_request_headers(test_headers_event("b", "POST", "/", HashMap::new()))
+            .await;
+        assert_eq!(agent.pending_count().await, 2);
+    }
+
+    /// An undecodable chunk fails closed in block mode and is allowed (body
+    /// not inspected) in detect-only mode.
+    #[tokio::test]
+    async fn test_undecodable_chunk() {
+        use zentinel_agent_protocol::v2::AgentHandlerV2;
+        use zentinel_agent_protocol::Decision;
+
+        for block_mode in [true, false] {
+            let (_dir, agent) = test_agent_with_rule(BODY_RULE, block_mode).await;
+            agent
+                .on_request_headers(test_headers_event("bad", "POST", "/", HashMap::new()))
+                .await;
+            let mut event = test_body_chunk_event("bad", b"", false);
+            event.data = "not base64!".to_string();
+            let response = agent.on_request_body_chunk(event).await;
+            if block_mode {
+                assert!(matches!(
+                    response.decision,
+                    Decision::Block { status: 403, .. }
+                ));
+                assert_eq!(agent.pending_count().await, 0);
+            } else {
+                assert!(matches!(response.decision, Decision::Allow));
+                let last = agent
+                    .on_request_body_chunk(test_body_chunk_event("bad", b"x", true))
+                    .await;
+                assert!(matches!(last.decision, Decision::Allow));
+                assert_eq!(agent.pending_count().await, 0);
+            }
+        }
+    }
+
+    /// A headers-phase engine error allows (documented) and parks a marker, so
+    /// the body is allowed too instead of being taken for an unknown request.
+    #[tokio::test]
+    async fn test_engine_error_at_headers_parks_marker() {
+        use zentinel_agent_protocol::v2::AgentHandlerV2;
+        use zentinel_agent_protocol::Decision;
+
+        let (_dir, agent) = test_agent_with_rule(BODY_RULE, true).await;
+        let mut headers = HashMap::new();
+        // libmodsecurity takes C strings: an interior NUL fails the transaction.
+        headers.insert("x-bad\0name".to_string(), vec!["v".to_string()]);
+        let response = agent
+            .on_request_headers(test_headers_event("err", "POST", "/", headers))
+            .await;
+        assert!(matches!(response.decision, Decision::Allow));
+        assert!(agent.pending_requests.read().await["err"].inspection_skipped);
+
+        let body = agent
+            .on_request_body_chunk(test_body_chunk_event("err", b"UNION SELECT", true))
+            .await;
+        assert!(matches!(body.decision, Decision::Allow));
+        assert_eq!(agent.pending_count().await, 0);
     }
 }
