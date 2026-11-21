@@ -31,7 +31,7 @@ Known gaps on `main` to keep in mind (do not copy the pattern): a headers-phase 
 
 `pending_requests` holds one entry (method, URI, cloned headers, client IP, body so far) per request that is waiting for its body. Every entry must have a bounded lifetime that does not depend on the client sending a body.
 
-- Today entries leave on the last chunk, on an oversized body, on `on_request_complete`, and on shutdown. With body inspection on, every request that passes the headers is parked, including body-less ones, and only `RequestComplete` removes those. Zentinel sends it from 26.11_3; earlier proxies never do, and the map then grows by one entry per request. PR #9 (open) adds release on response headers, no parking for `Content-Length: 0`, an idle timeout and a cap.
+- Today entries leave on the last chunk, on an oversized body, on `on_request_complete`, and on shutdown. Every entry must have a release path that does not depend on the client.
 - A change must not add another unbounded growth path, and must not rely on the proxy alone to release state.
 - A cap or eviction must fail closed and must not let a client evict its own parked request to get its body through uninspected (see the review of #9). Detect-only mode must never block because of a cap or unknown state.
 - Body buffers are limited by `max-body-size`; keep the check before the append.

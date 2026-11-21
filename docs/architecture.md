@@ -83,7 +83,7 @@ An entry is created at step 4 of `request_headers` and removed by:
 
 It is **not** removed by a configure (#7) or a drain (#11). Both used to clear it, which let a body that straddled them through uninspected.
 
-On `main`, nothing bounds the number of entries. A request that sends no body is released only by `RequestComplete`. Zentinel sends `RequestComplete` to participating agents from release 26.11_3; with older proxies every body-less request leaves an entry for the life of the process. PR #9 proposes release on response headers, no parking for `Content-Length: 0`, an idle timeout and a cap. Until then, see [operations.md](operations.md#resource-limits).
+A request that sends no body is released by `RequestComplete`, which Zentinel sends to participating agents from release 26.11_3. See [operations.md](operations.md#resource-limits).
 
 ## Configure
 

@@ -56,10 +56,8 @@ Note: rule id reporting landed after 0.4.1. With 0.4.1 and earlier, the block li
 | Resource | Bound | Notes |
 |---|---|---|
 | Body buffer per request | `max-body-size` (default 1 MiB) | A body over the limit is passed uninspected and its buffer freed. Match it to the proxy's `max-inspection-bytes` so the two agree on what gets inspected. |
-| Pending requests | none on `main` | One entry per request waiting for its body: method, URI, a copy of all headers, client IP and the body so far. |
+| Pending requests | released on the last body chunk, an oversized body, or `RequestComplete` | One entry per request waiting for its body: method, URI, a copy of all headers, client IP and the body so far. Run Zentinel 26.11_3 or later, which sends `RequestComplete`. |
 | Rule set | one copy | Shared by all requests. A configure that changes rules builds the new set before swapping it in, so memory briefly holds two. |
 | Concurrency | advertised 100 | `max_concurrency` and `concurrent_requests` in the capabilities; the agent itself does not enforce a limit. |
-
-**Pending requests and older proxies.** With body inspection on, every request that passes the header checks gets a pending entry, whether or not it has a body. The entry for a request without a body is released only when the proxy sends `RequestComplete`, which Zentinel does from release 26.11_3. With an older proxy, the map grows by one entry per such request for the life of the process (measured in #9 at about 1.5 KB for a minimal `GET`, more with large headers), and a client can drive the agent out of memory with ordinary requests. Until PR #9 lands, either run Zentinel 26.11_3 or later, or set `MODSEC_BODY_INSPECTION=false` (the query string and headers are still inspected).
 
 Run the agent under a process memory limit (systemd `MemoryMax=`, a container limit) in any case, sized for the rule set plus `max-body-size` times your concurrent uploads.

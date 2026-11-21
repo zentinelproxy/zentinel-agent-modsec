@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://zentinelproxy.io">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
-      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/banner/zentinel-agent-modsec-banner-on-dark.svg">
+      <img alt="Zentinel ModSecurity agent" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/banner/zentinel-agent-modsec-banner-on-light.svg" height="64">
     </picture>
   </a>
 </p>
@@ -51,12 +51,6 @@ behavior, zentinelsec for a single static binary.
 >   protocol: the proxy's handshake fails with `Invalid message format` and
 >   every request gets a 503. Fixed in 0.4.0. The bundle installs 0.4.1 from
 >   Zentinel 26.10_8 on; earlier releases install 0.3.0.
-> - With body inspection on, the agent keeps state for every request that
->   passes the header checks until its body arrives. A request without a body
->   is released only when the proxy sends `RequestComplete`, which Zentinel
->   does from 26.11_3; with older proxies that state grows by one entry per
->   request. #9 tracks the agent-side bound; see
->   [docs/operations.md](docs/operations.md#resource-limits).
 > - Up to 0.4.1, a drain dropped request bodies that were being buffered, so
 >   their last chunk passed uninspected (#8). Fixed on `main` (#11); not
 >   reachable with the current protocol crate, which does not deliver drains
