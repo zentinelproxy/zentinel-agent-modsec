@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://zentinelproxy.io">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-dark.svg">
-      <img alt="Zentinel" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/lockup/zentinel-lockup-light.svg" height="52">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/banner/zentinel-agent-modsec-banner-on-dark.svg">
+      <img alt="Zentinel ModSecurity agent" src="https://raw.githubusercontent.com/zentinelproxy/design/main/marks/banner/zentinel-agent-modsec-banner-on-light.svg" height="64">
     </picture>
   </a>
 </p>
@@ -14,8 +14,8 @@
 <p align="center">
   <a href="https://github.com/zentinelproxy/zentinel-agent-modsec/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/zentinelproxy/zentinel-agent-modsec/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-9b4d8a?style=flat&labelColor=1f161e">
-  <img alt="Rust: 1.94.1+" src="https://img.shields.io/badge/rust-1.94.1%2B-f68d31?style=flat&labelColor=1f161e&logo=rust&logoColor=white">
-  <img alt="Agent protocol: v2" src="https://img.shields.io/badge/agent%20protocol-v2-f68d31?style=flat&labelColor=1f161e">
+  <img alt="Rust 1.94.1+" src="https://img.shields.io/badge/rust-1.94.1%2B-f68d31?style=flat&labelColor=1f161e&logo=rust&logoColor=white">
+  <img alt="Agent protocol v2" src="https://img.shields.io/badge/agent%20protocol-v2-f68d31?style=flat&labelColor=1f161e">
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@ a pure-Rust engine with no C dependency, whose CRS conformance is measured
 against the upstream regression suite. Choose this agent for the reference
 behavior, zentinelsec for a single static binary.
 
-> **Known limitations** (checked against stock CRS on 2026-10-21):
+> **Known limitations** (checked against stock CRS on 2026-10-21, and against `main` on 2026-11-21):
 >
 > - Up to 0.3.0, phase 2 rules ran only when a request had a body, so under
 >   CRS (whose detection and 949110 blocking are phase 2) an attack in the
@@ -47,11 +47,14 @@ behavior, zentinelsec for a single static binary.
 >   parsed. All three are fixed in 0.4.0.
 > - A body larger than `--max-body-size` is passed on uninspected.
 > - `--response-inspection` is accepted but response bodies are not inspected.
-> - Release 0.3.0 (which `zentinel bundle install modsec` still installs) was
->   tagged before the UDS transport moved to the v2 protocol: the proxy's
->   handshake fails with `Invalid message format` and every request gets a
->   503. 0.4.0 fixes this; until it is released and the bundle points at it,
->   build from `main`.
+> - Release 0.3.0 was tagged before the UDS transport moved to the v2
+>   protocol: the proxy's handshake fails with `Invalid message format` and
+>   every request gets a 503. Fixed in 0.4.0. The bundle installs 0.4.1 from
+>   Zentinel 26.10_8 on; earlier releases install 0.3.0.
+> - Up to 0.4.1, a drain dropped request bodies that were being buffered, so
+>   their last chunk passed uninspected (#8). Fixed on `main` (#11); not
+>   reachable with the current protocol crate, which does not deliver drains
+>   to the agent.
 
 ## Quick start
 
@@ -61,8 +64,8 @@ brew install modsecurity          # macOS; on Linux see Install
 sudo git clone https://github.com/coreruleset/coreruleset /etc/modsecurity/crs
 sudo cp /etc/modsecurity/crs/crs-setup.conf.example /etc/modsecurity/crs/crs-setup.conf
 
-# 2. The agent, built from main (see Known limitations)
-cargo install --git https://github.com/zentinelproxy/zentinel-agent-modsec
+# 2. The agent
+zentinel bundle install modsec
 
 # 3. Run it with the CRS setup file and every rule file
 zentinel-modsec-agent \
@@ -144,23 +147,20 @@ binary links it dynamically).
 ```bash
 # macOS
 brew install modsecurity
-
-# Linux: build from source if your distribution ships an older version
-git clone --depth 1 --branch v3.0.13 https://github.com/owasp-modsecurity/ModSecurity
-cd ModSecurity && git submodule update --init
-./build.sh && ./configure && make && sudo make install
 ```
 
-### Cargo (recommended for now)
-
-The crate is not on crates.io; install from the repository (needs
-`pkg-config` and the libmodsecurity headers):
+On Linux, install your distribution's `libmodsecurity3` if it is 3.0.13 or
+newer, or build it from source against PCRE2 the way CI does (see
+[docs/building-libmodsecurity.md](docs/building-libmodsecurity.md)):
 
 ```bash
-cargo install --git https://github.com/zentinelproxy/zentinel-agent-modsec
+sudo apt-get install -y build-essential libtool autoconf automake pkg-config \
+  libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
+git clone --depth 1 --branch v3.0.14 https://github.com/owasp-modsecurity/ModSecurity
+cd ModSecurity && git submodule update --init
+./build.sh && ./configure --prefix=/usr/local --without-lmdb --with-pcre2
+make -j"$(nproc)" && sudo make install && sudo ldconfig
 ```
-
-This installs the `zentinel-modsec-agent` binary built from `main`.
 
 ### Bundle
 
@@ -168,9 +168,10 @@ This installs the `zentinel-modsec-agent` binary built from `main`.
 zentinel bundle install modsec
 ```
 
-Installs the release pinned in the proxy's bundle lock. Until that is 0.4.0
-it is 0.3.0 (`linux-x86_64` and `darwin-aarch64` only), which does not work
-with the current proxy (see Known limitations). See the
+Installs the release pinned in the proxy's bundle lock: 0.4.1 from Zentinel
+26.10_8 on (`linux-x86_64`, `linux-aarch64`, `darwin-aarch64`). Earlier
+releases pin 0.3.0, which does not work with the current proxy (see Known
+limitations). See the
 [bundle documentation](https://docs.zentinelproxy.io/deployment/bundle/).
 
 ### Release binaries
@@ -183,13 +184,25 @@ published. The binary links libmodsecurity 3 dynamically, so the host needs it
 limitation above.
 
 ```bash
-VERSION=0.4.0
+VERSION=0.4.1
 PLATFORM=linux-x86_64   # or linux-aarch64, darwin-aarch64
 curl -fsSL -o zentinel-modsec-agent.tar.gz \
   "https://github.com/zentinelproxy/zentinel-agent-modsec/releases/download/v${VERSION}/zentinel-modsec-agent-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf zentinel-modsec-agent.tar.gz
 sudo install -m 0755 zentinel-modsec-agent /usr/local/bin/
 ```
+
+### Cargo
+
+The crate is not on crates.io; install from the repository (needs `protoc`,
+`pkg-config` and the libmodsecurity headers):
+
+```bash
+cargo install --git https://github.com/zentinelproxy/zentinel-agent-modsec
+```
+
+This installs the `zentinel-modsec-agent` binary built from `main`, which has
+fixes not yet in a release (rule ids in the block log, drain handling).
 
 ### From source
 
@@ -205,17 +218,17 @@ The agent is configured with command-line flags or environment variables,
 and, from Zentinel releases that deliver it, with a `config { }` block on the
 proxy's `agent` definition (see [below](#the-config--block)).
 
-| Option | Environment | Default | Meaning |
-|---|---|---|---|
-| `--socket` | `AGENT_SOCKET` | `/tmp/zentinel-modsec.sock` | Unix socket to listen on |
-| `--grpc-address` | `AGENT_GRPC_ADDRESS` | unset | Listen on gRPC at this address (e.g. `127.0.0.1:50051`) instead of the socket |
-| `--rules` | `MODSEC_RULES` | none | Rule file or glob; repeat the flag or comma-separate. Loaded in order, so put `crs-setup.conf` first. With no rules nothing is blocked |
-| `--block-mode` | `MODSEC_BLOCK_MODE` | `true` | Block on an intervention; `false` is detect-only |
-| `--exclude-paths` | `MODSEC_EXCLUDE_PATHS` | none | Comma-separated path prefixes that skip inspection |
-| `--body-inspection` | `MODSEC_BODY_INSPECTION` | `true` | Inspect request bodies |
-| `--max-body-size` | `MODSEC_MAX_BODY_SIZE` | `1048576` | Largest body inspected, in bytes; larger bodies pass uninspected |
-| `--response-inspection` | `MODSEC_RESPONSE_INSPECTION` | `false` | Accepted, not implemented |
-| `-v`, `--verbose` | `MODSEC_VERBOSE` | `false` | Debug logging |
+| Option | Default | Meaning |
+|---|---|---|
+| `--socket` (`AGENT_SOCKET`) | `/tmp/zentinel-modsec.sock` | Unix socket to listen on |
+| `--grpc-address` (`AGENT_GRPC_ADDRESS`) | unset | Listen on gRPC at this address (e.g. `127.0.0.1:50051`) instead of the socket |
+| `--rules` (`MODSEC_RULES`) | none | Rule file or glob; repeat the flag or comma-separate. Loaded in order, so put `crs-setup.conf` first. With no rules nothing is blocked |
+| `--block-mode` (`MODSEC_BLOCK_MODE`) | `true` | Block on an intervention; `false` is detect-only |
+| `--exclude-paths` (`MODSEC_EXCLUDE_PATHS`) | none | Comma-separated path prefixes that skip inspection |
+| `--body-inspection` (`MODSEC_BODY_INSPECTION`) | `true` | Inspect request bodies |
+| `--max-body-size` (`MODSEC_MAX_BODY_SIZE`) | `1048576` | Largest body inspected, in bytes; larger bodies pass uninspected |
+| `--response-inspection` (`MODSEC_RESPONSE_INSPECTION`) | `false` | Accepted, not implemented |
+| `-v`, `--verbose` (`MODSEC_VERBOSE`) | `false` | Debug logging |
 
 The boolean options are switches: `--block-mode` cannot take a value, so
 `--block-mode=false` is rejected. To turn one off, set the environment
@@ -273,9 +286,13 @@ any ModSecurity deployment. Proxy-side agent options are in the
 
 ## How it works
 
-On `request_headers` the agent runs ModSecurity phase 1 (URI, query string,
-headers). If that passes and body inspection is on, it buffers the body and
-runs phase 2 when the last chunk arrives.
+On `request_headers` the agent runs a ModSecurity transaction on the URI,
+query string and headers, through phase 1 and phase 2 with an empty body (CRS
+inspects `ARGS` and makes its blocking decision in phase 2). If that passes and
+body inspection is on, it buffers the body and, when the last chunk arrives,
+runs the transaction again with the body. [docs/architecture.md](docs/architecture.md)
+describes the request lifecycle, and [docs/operations.md](docs/operations.md)
+health, failure modes and resource limits.
 
 | Outcome | What the agent returns |
 |---|---|
@@ -283,7 +300,7 @@ runs phase 2 when the last chunk arrives.
 | Intervention, detect-only | Allow, with `X-WAF-Detected` added to the request sent upstream |
 | Engine error | Allow, logged as a warning |
 
-## Which Rule Blocked a Request
+### Which rule blocked a request
 
 When a request is blocked (or detected, in detect-only mode) the agent logs one
 `Request blocked by ModSecurity` / `ModSecurity detection` line at `info`
@@ -301,6 +318,9 @@ Rules that matched but did not cause a block are listed at `debug` level
 
 Rule ids and rule text are never sent to the client; they are in the log and the audit metadata only.
 
+Rule ids in the log and audit metadata are on `main`; 0.4.1 and earlier do
+not report them.
+
 ## Development
 
 ```bash
@@ -309,10 +329,22 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Building needs Rust 1.94.1+, libmodsecurity 3.0.13+ and `protoc`.
+Building needs Rust 1.94.1+, libmodsecurity 3.0.13+ and `protoc`. The CRS
+tests skip themselves without a CRS checkout in `testdata/crs` (CI fetches the
+commit pinned as `CRS_COMMIT` in `.github/workflows/ci.yml`), and
+`scripts/smoke-test.sh` runs the release binary with stock CRS behind a real
+Zentinel; its header lists what it needs. Building libmodsecurity is covered in
+[docs/building-libmodsecurity.md](docs/building-libmodsecurity.md).
+
 
 ## Related
 
+- [docs/architecture.md](docs/architecture.md): request lifecycle, pending
+  bodies, decisions, configure, drain, the libmodsecurity boundary
+- [docs/operations.md](docs/operations.md): configuration summary, failure
+  modes, health and draining, block logs, resource limits
+- [docs/building-libmodsecurity.md](docs/building-libmodsecurity.md):
+  building libmodsecurity 3 with PCRE2 on Linux and macOS
 - [Registry page](https://registry.zentinelproxy.io/modsec/)
 - [zentinel-agent-zentinelsec](https://github.com/zentinelproxy/zentinel-agent-zentinelsec): the same rules on the pure-Rust engine
 - [zentinel-modsec](https://github.com/zentinelproxy/zentinel-modsec): that engine
