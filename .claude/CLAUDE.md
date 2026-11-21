@@ -25,6 +25,7 @@ This agent is the reference: when it and zentinelsec disagree on a CRS request, 
 | `tests/configure.rs` | Configure: idempotent, merging, strict; pending bodies survive it |
 | `tests/drain.rs` | Drain keeps pending bodies; health reports `Draining` |
 | `tests/rule_id_logging.rs` | Block log line and audit metadata carry rule id and message |
+| `tests/pending_request_leak.rs` | Pending map stays bounded; markers for bodies allowed by configuration; detect-only never blocks |
 | `scripts/smoke-test.sh` | Release binary + stock CRS behind a real Zentinel |
 | `docs/` | `architecture.md`, `operations.md`, `building-libmodsecurity.md` |
 

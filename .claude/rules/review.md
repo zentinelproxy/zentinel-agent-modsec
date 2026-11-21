@@ -25,13 +25,14 @@ It must never be allowed because agent state was lost. The example is #8, fixed 
 - `on_configure` must not drop pending entries, including when it rebuilds the engine (#7). Pending bodies are inspected with the engine in effect when their last chunk arrives.
 - Any new path that removes a pending entry, or returns Allow from `on_request_body_chunk`, needs a test showing which of the two outcomes above it is.
 
-Known gaps on `main` to keep in mind (do not copy the pattern): a headers-phase engine error allows the request and parks nothing, so its body is not inspected; an undecodable chunk is allowed and dropped from the buffer while the entry stays.
+- A body allowed by configuration (excluded path, detect-only detection at the headers, headers-phase engine error, over `max-body-size`) keeps a marker entry until its last chunk, so its chunks are not mistaken for an unknown correlation.
+- A body chunk with no pending entry, or one that does not decode, fails closed in block mode.
 
 ## 3. Pending state is bounded
 
 `pending_requests` holds one entry (method, URI, cloned headers, client IP, body so far) per request that is waiting for its body. Every entry must have a bounded lifetime that does not depend on the client sending a body.
 
-- Today entries leave on the last chunk, on an oversized body, on `on_request_complete`, and on shutdown. Every entry must have a release path that does not depend on the client.
+- Requests with `Content-Length: 0` are not parked. Entries leave on the last chunk, on `on_response_headers`, on `on_request_complete`, after 120 s idle (each chunk refreshes the timer), and on shutdown. The map is capped. Every entry must have a release path that does not depend on the client.
 - A change must not add another unbounded growth path, and must not rely on the proxy alone to release state.
 - A cap or eviction must fail closed and must not let a client evict its own parked request to get its body through uninspected (see the review of #9). Detect-only mode must never block because of a cap or unknown state.
 - Body buffers are limited by `max-body-size`; keep the check before the append.
