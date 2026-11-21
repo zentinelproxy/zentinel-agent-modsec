@@ -738,14 +738,22 @@ async fn test_crs_clean_post_request() {
         vec!["application/json".to_string()],
     );
     headers.insert("User-Agent".to_string(), vec!["Mozilla/5.0".to_string()]);
+    headers.insert("Host".to_string(), vec!["example.com".to_string()]);
+    headers.insert("Accept".to_string(), vec!["application/json".to_string()]);
+    let body = r#"{"name": "John Doe", "email": "john@example.com", "age": 30}"#;
+    headers.insert("Content-Length".to_string(), vec![body.len().to_string()]);
 
     let headers_event = make_request_headers("POST", "/api/users", headers);
-    let _ = client
+    let headers_response = client
         .send_request_headers(&headers_event.metadata.correlation_id, &headers_event)
         .await
         .expect("Failed to send headers");
+    assert!(
+        is_allow(&headers_response.decision),
+        "CRS should allow the headers of a clean POST request: {:?}",
+        headers_response.decision
+    );
 
-    let body = r#"{"name": "John Doe", "email": "john@example.com", "age": 30}"#;
     let body_event = make_body_chunk(&headers_event.metadata.correlation_id, body, true);
     let response = client
         .send_request_body_chunk(&body_event.correlation_id, &body_event)
