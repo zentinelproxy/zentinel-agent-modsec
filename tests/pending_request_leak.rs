@@ -180,3 +180,112 @@ async fn response_headers_clear_pending_before_late_body_chunk() {
         "late body after response must fail closed"
     );
 }
+
+fn agent_with_rule(
+    rule: &str,
+    block_mode: bool,
+    exclude: &[&str],
+) -> (tempfile::TempDir, ModSecAgent) {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("rules.conf"), rule).unwrap();
+    let config = ModSecConfig {
+        rules_paths: vec![dir.path().join("rules.conf").display().to_string()],
+        block_mode,
+        exclude_paths: exclude.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    };
+    (dir, ModSecAgent::new(config).unwrap())
+}
+
+const BODY_RULE: &str = r#"SecRule REQUEST_BODY "@contains attack" "id:2,phase:2,deny,status:403""#;
+const QUERY_RULE: &str = r#"SecRule ARGS "@contains evil" "id:10,phase:2,deny,status:403""#;
+
+/// A body on an excluded path is allowed by configuration, not blocked as an
+/// unknown correlation, and leaves nothing behind.
+#[tokio::test]
+async fn excluded_path_body_is_allowed_and_released() {
+    let (_dir, agent) = agent_with_rule(BODY_RULE, true, &["/upload"]);
+
+    let headers = agent
+        .on_request_headers(headers_event(
+            "excl",
+            "POST",
+            "/upload/file",
+            HashMap::new(),
+        ))
+        .await;
+    assert!(matches!(headers.decision, Decision::Allow));
+
+    let first = agent
+        .on_request_body_chunk(body_chunk("excl", b"attack ", false))
+        .await;
+    assert!(matches!(first.decision, Decision::Allow));
+    let last = agent
+        .on_request_body_chunk(body_chunk("excl", b"attack", true))
+        .await;
+    assert!(matches!(last.decision, Decision::Allow));
+    assert_eq!(agent.pending_count().await, 0);
+
+    // Without a body, the marker leaves with the response.
+    agent
+        .on_request_headers(headers_event(
+            "excl-get",
+            "GET",
+            "/upload/x",
+            HashMap::new(),
+        ))
+        .await;
+    agent
+        .on_response_headers(ResponseHeadersEvent {
+            correlation_id: "excl-get".to_string(),
+            status: 200,
+            headers: HashMap::new(),
+        })
+        .await;
+    assert_eq!(agent.pending_count().await, 0);
+}
+
+/// Detect-only never blocks: not the body of a request detected at the
+/// headers, and not a body chunk with no pending request.
+#[tokio::test]
+async fn detect_only_never_blocks_body_chunks() {
+    let (_dir, agent) = agent_with_rule(QUERY_RULE, false, &[]);
+
+    let headers = agent
+        .on_request_headers(headers_event("det", "POST", "/s?q=evil", HashMap::new()))
+        .await;
+    assert!(matches!(headers.decision, Decision::Allow));
+    assert!(headers.audit.tags.contains(&"detected".to_string()));
+    assert_eq!(agent.pending_count().await, 1, "a marker is parked");
+    let body = agent
+        .on_request_body_chunk(body_chunk("det", b"a=1", true))
+        .await;
+    assert!(matches!(body.decision, Decision::Allow));
+    assert_eq!(agent.pending_count().await, 0);
+
+    let orphan = agent
+        .on_request_body_chunk(body_chunk("never-seen", b"a=1", true))
+        .await;
+    assert!(matches!(orphan.decision, Decision::Allow));
+}
+
+/// Body-less requests without `Content-Length` are parked (a body may follow)
+/// and released when their response starts.
+#[tokio::test]
+async fn bodyless_requests_released_on_response_headers() {
+    let (_dir, agent) = minimal_agent();
+    for i in 0..10_000 {
+        let id = format!("bare-{i}");
+        agent
+            .on_request_headers(headers_event(&id, "GET", "/", HashMap::new()))
+            .await;
+        agent
+            .on_response_headers(ResponseHeadersEvent {
+                correlation_id: id,
+                status: 200,
+                headers: HashMap::new(),
+            })
+            .await;
+    }
+    assert_eq!(agent.pending_count().await, 0);
+}
