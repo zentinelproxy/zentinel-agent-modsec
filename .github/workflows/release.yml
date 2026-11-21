@@ -89,7 +89,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler build-essential libtool autoconf automake \
-            pkg-config libcurl4-openssl-dev libpcre3-dev libpcre2-dev libyajl-dev libxml2-dev
+            pkg-config libcurl4-openssl-dev libpcre2-dev libyajl-dev libxml2-dev
 
       - name: Cache libmodsecurity (Linux)
         if: runner.os == 'Linux'
@@ -100,7 +100,7 @@ jobs:
             /usr/local/lib/libmodsecurity*
             /usr/local/lib/pkgconfig/modsecurity.pc
             /usr/local/include/modsecurity
-          key: ${{ runner.os }}-${{ runner.arch }}-libmodsecurity-${{ env.LIBMODSECURITY_VERSION }}
+          key: ${{ runner.os }}-${{ runner.arch }}-libmodsecurity-${{ env.LIBMODSECURITY_VERSION }}-pcre2
 
       # The agent links libmodsecurity dynamically; built here the same way as
       # in ci.yml, so linux-x86_64 and linux-aarch64 (native arm runner) match.
@@ -111,7 +111,9 @@ jobs:
           cd /tmp/modsecurity
           git submodule init && git submodule update
           ./build.sh
-          ./configure --prefix=/usr/local --without-lmdb
+          # PCRE1 is end-of-life and no longer packaged in the runner image
+          # (ubuntu-26.04); build libmodsecurity against PCRE2 instead.
+          ./configure --prefix=/usr/local --without-lmdb --with-pcre2
           make -j"$(nproc)"
           sudo make install
 
