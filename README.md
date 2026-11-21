@@ -55,6 +55,10 @@ behavior, zentinelsec for a single static binary.
 >   their last chunk passed uninspected (#8). Fixed in 0.4.2 (#11); not
 >   reachable with the current protocol crate, which does not deliver drains
 >   to the agent.
+> - Up to 0.4.2, with body inspection on, the state kept for a request that
+>   sent no body was released only by `RequestComplete`, which Zentinel sends
+>   from 26.11_3; behind older proxies the agent's memory grew with traffic.
+>   Fixed in the next release.
 
 ## Quick start
 
@@ -290,7 +294,10 @@ On `request_headers` the agent runs a ModSecurity transaction on the URI,
 query string and headers, through phase 1 and phase 2 with an empty body (CRS
 inspects `ARGS` and makes its blocking decision in phase 2). If that passes and
 body inspection is on, it buffers the body and, when the last chunk arrives,
-runs the transaction again with the body. [docs/architecture.md](docs/architecture.md)
+runs the transaction again with the body. A request is held only while its
+body may still arrive: it is released by its last body chunk, by the start of
+its response, or after 120 s without a body chunk, and at most 100 000 are held
+at once. [docs/architecture.md](docs/architecture.md)
 describes the request lifecycle, and [docs/operations.md](docs/operations.md)
 health, failure modes and resource limits.
 
@@ -299,6 +306,7 @@ health, failure modes and resource limits.
 | Intervention, block mode | The rule's status, body `Forbidden`, response headers `X-WAF-Blocked: true` and `X-WAF-Message: Blocked by ModSecurity` |
 | Intervention, detect-only | Allow, with `X-WAF-Detected` added to the request sent upstream |
 | Engine error | Allow, logged as a warning |
+| Body chunk the agent cannot inspect (no pending request, undecodable), or the pending-request limit reached, block mode | `403`, logged as `Blocking request (fail-closed)`; detect-only allows and logs a warning |
 
 ### Which rule blocked a request
 

@@ -21,7 +21,7 @@ Zentinel proxy ──(agent protocol v2: UDS or gRPC)──> UdsAgentServerV2 / 
 
 - **`ModSecEngine`** owns one libmodsecurity instance and one compiled rule set. It is built at startup from the command line, and rebuilt by a configure that changes `rules-paths` or `body-inspection-enabled`. Building it adds `SecRuleEngine On`; with body inspection, also `SecRequestBodyAccess On` and the JSON and XML body processor rules (ids 200000 and 200001, from `modsecurity.conf-recommended`), then loads each rule file by path in the order given.
 - **`ModSecAgent`** implements the protocol handler. It holds the engine behind a `tokio::sync::RwLock`: requests take a read lock, a configure takes the write lock to swap the engine or its settings.
-- **Pending map.** A request whose headers passed and whose body is still to come has a `PendingTransaction` here: method, URI, a copy of the headers, client IP and the body bytes received so far. It is keyed by the proxy's correlation id.
+- **Pending map.** A request whose headers passed and whose body may still come has a `PendingTransaction` here: method, URI, a copy of the headers, client IP and the body bytes received so far. A request whose body is not inspected by configuration has a marker instead (no copy of the request), so its chunks are recognised. Entries are keyed by the proxy's correlation id.
 
 ## Request lifecycle
 
@@ -29,31 +29,40 @@ The proxy sends events per request; the agent advertises `request_headers`, `req
 
 ### `request_headers`
 
-1. If the path starts with an `exclude-paths` prefix: Allow. Nothing is parked, so the body is not inspected either.
+"A body may follow" below means body inspection is on and the request does not have `Content-Length: 0` (every value). Nothing else proves there is no body: the proxy reports `HTTP/1.1` for every request and HTTP/2 needs no `Content-Length`. Parking is subject to the cap (see Pending map lifetime).
+
+1. If the path starts with an `exclude-paths` prefix: Allow. If a body may follow, park a marker: the body is allowed uninspected.
 2. Run a libmodsecurity transaction (`process_request`) with an empty body: `process_uri`, every request header, `process_request_headers` (phase 1), then `process_request_body` on zero bytes (phase 2). Phase 2 runs here because CRS evaluates `ARGS` (the query string) and makes its anomaly-score blocking decision (rule 949110) in phase 2; without it no `GET` is blocked under stock CRS.
-3. Intervention → the verdict is answered (see Decisions). Nothing is parked.
-4. No intervention and body inspection on → park a `PendingTransaction` and Allow. The agent always parks, because whether a body follows cannot be known from the headers (HTTP/2 needs no `Content-Length`).
-5. No intervention and body inspection off → Allow.
-6. Engine error → `warn` log and Allow. Nothing is parked.
+3. Intervention → the verdict is answered (see Decisions). In block mode nothing is parked. In detect-only mode, if a body may follow, a marker is parked; the body is not inspected again.
+4. No intervention and a body may follow → park a `PendingTransaction` and Allow.
+5. No intervention and no body can follow → Allow. Nothing is parked.
+6. Engine error → `warn` log and Allow. If a body may follow, park a marker: the body is allowed too.
 
 ### `request_body_chunk`
 
-1. No pending entry for the correlation id (excluded path, inspection off, headers blocked or errored, body already over the limit) → Allow.
-2. Decode the chunk (base64). If decoding fails: `warn` and Allow for this chunk; the entry stays.
-3. If the buffered body plus this chunk exceeds `max-body-size` → remove the entry and Allow. The rest of the body passes uninspected; this is the documented `max-body-size` behavior.
-4. Append the chunk. If it is not the last chunk → Allow.
-5. On the last chunk, remove the entry and run the whole transaction again, with the method, URI and headers saved at step 4 above and the full body. Phases 1 and 2 both run again, now with the body parsed by the body processor libmodsecurity selected (URL-encoded, multipart, JSON or XML).
-6. Intervention → verdict; otherwise Allow. Engine error → `warn` and Allow.
+1. Body inspection off → Allow.
+2. No pending entry for the correlation id → block mode: fail-closed `403` (tag `fail-closed`); detect-only: `warn` and Allow. A body chunk arrives without an entry only if the entry was released (response started, idle timeout) or never made (refused at the cap); the agent does not let a body through because its state is missing.
+3. Refresh the entry's idle timer.
+4. Decode the chunk (base64). If decoding fails: block mode → remove the entry and fail-closed `403`; detect-only → `warn`, mark the entry as not inspected and Allow.
+5. Marker → Allow; on the last chunk, remove it.
+6. If the buffered body plus this chunk exceeds `max-body-size` → free the buffer, turn the entry into a marker and Allow. The rest of the body passes uninspected; this is the documented `max-body-size` behavior.
+7. Append the chunk. If it is not the last chunk → Allow.
+8. On the last chunk, remove the entry and run the whole transaction again, with the method, URI and headers saved at step 4 above and the full body. Phases 1 and 2 both run again, now with the body parsed by the body processor libmodsecurity selected (URL-encoded, multipart, JSON or XML).
+9. Intervention → verdict; otherwise Allow. Engine error → `warn` and Allow.
 
-The engine used in step 5 is the one in effect when the last chunk arrives, so a request whose body straddles a configure is inspected with the new settings.
+The engine used in step 8 is the one in effect when the last chunk arrives, so a request whose body straddles a configure is inspected with the new settings.
 
-### `response_headers`, `response_body_chunk`
+### `response_headers`
+
+Removes the pending entry for that correlation id, if any, and allows: once the response has started, no request body is inspected. This releases the entry of a request that sent no body, whether or not the proxy sends `RequestComplete`.
+
+### `response_body_chunk`
 
 Allow. Response inspection is not implemented; `--response-inspection` is accepted and ignored.
 
 ### `request_complete`
 
-Removes the pending entry for that correlation id, if any, and allows. This is the only path that releases a body-less request's entry (see Pending map lifetime).
+Removes the pending entry for that correlation id, if any, and allows.
 
 ## Transactions
 
@@ -70,20 +79,21 @@ A transaction's intervention with status 0 or 200 is ignored. Otherwise the agen
 
 Both carry `AuditMetadata` with tags (`modsec`, `blocked` or `detected`, and `body` for body-stage decisions), `rule_ids` and `reason_codes` (the sanitized rule message), and both are logged at `info` (see [operations.md](operations.md#logging-of-blocks)). The client never sees rule ids or messages.
 
-In detect-only mode a detection at the headers stage parks nothing, so that request's body is not inspected.
+In detect-only mode a detection at the headers stage parks a marker, so that request's body is allowed without being inspected again. Detect-only mode never blocks: where block mode fails closed (no pending entry, undecodable chunk, cap reached), detect-only logs a warning and allows.
 
 ## Pending map lifetime
 
-An entry is created at step 4 of `request_headers` and removed by:
+An entry (or marker) is created by `request_headers` when a body may follow, and removed by:
 
-- the last body chunk (inspected),
-- a chunk that takes the body over `max-body-size` (allowed by configuration),
+- the last body chunk,
+- `on_response_headers` (the response has started),
 - `on_request_complete`,
+- the idle sweep: an entry with no event (headers or body chunk) for 120 s is dropped. Each chunk refreshes the timer, so a slow upload is not dropped while it streams. The sweep runs when a request is parked, at most once a second,
 - `on_shutdown` (clears the map).
 
 It is **not** removed by a configure (#7) or a drain (#11). Both used to clear it, which let a body that straddled them through uninspected.
 
-A request that sends no body is released by `RequestComplete`, which Zentinel sends to participating agents from release 26.11_3. See [operations.md](operations.md#resource-limits).
+The map is capped at 100 000 entries. At the cap a new request that would be parked is refused: block mode answers a fail-closed `403`, detect-only allows it without parking. No entry is evicted to make room, so a client cannot push its own parked request out with new requests and then send the body uninspected. A body chunk for a released entry fails closed in block mode.
 
 ## Configure
 

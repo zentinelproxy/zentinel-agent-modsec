@@ -26,6 +26,7 @@ The agent decides Allow or Block; what happens when the agent cannot answer is t
 - `failure-mode "open"`: requests pass uninspected while the agent is down. Every attack the rules would have blocked passes too.
 - The agent itself fails open on an engine error (libmodsecurity returns an error for a transaction): it logs `ModSecurity processing error` or `ModSecurity body processing error` at `warn` and allows. A steady stream of these needs investigating; it is not normal operation.
 - Configured exclusions, bodies over `max-body-size`, and detect-only mode all allow by design. A detect-only detection at the headers stage also skips inspection of that request's body.
+- The agent fails closed when it cannot inspect a body it should: a body chunk with no pending request (its entry was released when the response started or after 120 s idle, or the pending-request limit refused it), or a chunk that does not decode. It answers `403` with audit tag `fail-closed` and logs `Blocking request (fail-closed)` at `warn` with the reason. When the pending-request limit is reached, new requests get the same `403`. In detect-only mode none of these block; they are logged at `warn` and allowed.
 - Keep `timeout-ms` on the agent above the time CRS takes on your largest inspected body. The agent advertises a 5 s maximum processing time.
 
 ## Health and draining
@@ -56,7 +57,7 @@ Note: rule id reporting landed in 0.4.2. With 0.4.1 and earlier, the block line 
 | Resource | Bound | Notes |
 |---|---|---|
 | Body buffer per request | `max-body-size` (default 1 MiB) | A body over the limit is passed uninspected and its buffer freed. Match it to the proxy's `max-inspection-bytes` so the two agree on what gets inspected. |
-| Pending requests | released on the last body chunk, an oversized body, or `RequestComplete` | One entry per request waiting for its body: method, URI, a copy of all headers, client IP and the body so far. Run Zentinel 26.11_3 or later, which sends `RequestComplete`. |
+| Pending requests | 100 000; each released on the last body chunk, the response, `RequestComplete`, or after 120 s without a body chunk | One entry per request in flight that may still send a body: method, URI, a copy of all headers, client IP and the body so far. Requests with `Content-Length: 0` are not parked. At the limit new requests are refused (see Failure modes). |
 | Rule set | one copy | Shared by all requests. A configure that changes rules builds the new set before swapping it in, so memory briefly holds two. |
 | Concurrency | advertised 100 | `max_concurrency` and `concurrent_requests` in the capabilities; the agent itself does not enforce a limit. |
 
