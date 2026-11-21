@@ -49,7 +49,7 @@ Rules that matched without an intervention are logged at `debug` (`--verbose` / 
 
 The log level is set only by `--verbose`; `RUST_LOG` is not read. Configures are logged with the payload hash and the names of the changed settings, never their values. Rejected configures are logged at `warn` with the reason.
 
-Note: rule id reporting landed after 0.4.1. With 0.4.1 and earlier, the block line does not carry `trigger`, `rules` or `rule_msg`.
+Note: rule id reporting landed in 0.4.2. With 0.4.1 and earlier, the block line does not carry `trigger`, `rules` or `rule_msg`.
 
 ## Resource limits
 

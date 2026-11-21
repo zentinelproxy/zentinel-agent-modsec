@@ -52,7 +52,7 @@ behavior, zentinelsec for a single static binary.
 >   every request gets a 503. Fixed in 0.4.0. The bundle installs 0.4.1 from
 >   Zentinel 26.10_8 on; earlier releases install 0.3.0.
 > - Up to 0.4.1, a drain dropped request bodies that were being buffered, so
->   their last chunk passed uninspected (#8). Fixed on `main` (#11); not
+>   their last chunk passed uninspected (#8). Fixed in 0.4.2 (#11); not
 >   reachable with the current protocol crate, which does not deliver drains
 >   to the agent.
 
@@ -184,7 +184,7 @@ published. The binary links libmodsecurity 3 dynamically, so the host needs it
 limitation above.
 
 ```bash
-VERSION=0.4.1
+VERSION=0.4.2
 PLATFORM=linux-x86_64   # or linux-aarch64, darwin-aarch64
 curl -fsSL -o zentinel-modsec-agent.tar.gz \
   "https://github.com/zentinelproxy/zentinel-agent-modsec/releases/download/v${VERSION}/zentinel-modsec-agent-${VERSION}-${PLATFORM}.tar.gz"
@@ -318,8 +318,8 @@ Rules that matched but did not cause a block are listed at `debug` level
 
 Rule ids and rule text are never sent to the client; they are in the log and the audit metadata only.
 
-Rule ids in the log and audit metadata are on `main`; 0.4.1 and earlier do
-not report them.
+Rule ids in the log and audit metadata are reported from 0.4.2; 0.4.1 and
+earlier do not report them.
 
 ## Development
 
